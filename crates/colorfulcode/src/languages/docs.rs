@@ -793,6 +793,8 @@ enum Body {
     Comment,
     /// An escaped delimiter such as `<%%`, left as text.
     Literal,
+    /// Mustache's `{{=<% %>=}}`, which changes the delimiters from here on.
+    SetDelims,
     Expr(&'static Spec),
     /// Like `Expr`, but a leading word followed by arguments is a helper call.
     Helper(&'static Spec),
@@ -864,7 +866,13 @@ impl Tpl<'_, '_, '_> {
         }
         let end = (close + d.close.len()).min(len);
         let ctx = &mut *self.ctx;
-        let comment = matches!(d.body, Body::Comment) || (matches!(d.body, Body::Helper(_)) && ctx.at(inner) == b'!');
+        // `{{! note }}` and Liquid's `{% # note %}` are comments too.
+        let comment = match d.body {
+            Body::Comment => true,
+            Body::Helper(_) => ctx.at(inner) == b'!',
+            Body::Stmt(_) => ctx.at(skip_whitespace_from(ctx, inner)) == b'#',
+            _ => false,
+        };
         if comment {
             ctx.emit(at, end, Kind::Comment);
             ctx.pos = end;
@@ -880,11 +888,15 @@ impl Tpl<'_, '_, '_> {
                 let e = name_end(ctx, w, b"").min(inner_end);
                 word = &src[w..e];
                 ctx.emit(w, e, Kind::Keyword);
-                // Re-lexing the tag name lets the spec see it, as in `block name`.
-                ctx.embed_spec(spec, w, inner_end);
+                if word == b"liquid" {
+                    liquid_lines(ctx, spec, e, inner_end);
+                } else {
+                    // Re-lexing the tag name lets the spec see it, as in `block name`.
+                    ctx.embed_spec(spec, w, inner_end);
+                }
             }
             Body::Code(language) => ctx.embed(language, inner, inner_end),
-            Body::Comment | Body::Literal => {}
+            Body::Comment | Body::Literal | Body::SetDelims => {}
         }
         ctx.emit(inner_end, end, t.mark);
         ctx.pos = end;
@@ -906,6 +918,23 @@ impl Tpl<'_, '_, '_> {
         }
         ctx.pos = open;
         open
+    }
+}
+
+/// The body of Liquid's `{% liquid %}` tag: one tag per line, without
+/// delimiters, and `#` comment lines.
+fn liquid_lines(ctx: &mut Ctx, spec: &'static Spec, from: usize, end: usize) {
+    let mut p = from;
+    while p < end {
+        let line_end = ctx.find_in(p, end, b"\n").unwrap_or(end);
+        let w = skip_whitespace_from(ctx, p).min(line_end);
+        if ctx.at(w) == b'#' {
+            ctx.emit(w, line_end, Kind::Comment);
+        } else if w < line_end {
+            ctx.emit(w, name_end(ctx, w, b"").min(line_end), Kind::Keyword);
+            ctx.embed_spec(spec, w, line_end);
+        }
+        p = line_end + 1;
     }
 }
 
@@ -946,9 +975,16 @@ fn template(ctx: &mut Ctx, t: &'static Template) {
             None => break,
         }
         if let Some(d) = t.delims.iter().find(|d| src[i..].starts_with(d.open)) {
-            if let Body::Literal = d.body {
-                i += d.open.len();
-                continue;
+            match d.body {
+                Body::Literal => {
+                    i += d.open.len();
+                    continue;
+                }
+                Body::SetDelims => {
+                    i = mustache(&mut tp, i, &d.open[..d.open.len() - 1], d.close);
+                    continue;
+                }
+                _ => {}
             }
             tp.flush(i);
             i = tp.tag(i, d, t).max(i + 1);
@@ -1056,7 +1092,7 @@ static LIQUID_SPEC: Spec = Spec {
         "break", "continue", "cycle", "tablerow", "endtablerow", "assign", "capture", "endcapture", "increment",
         "decrement", "include", "render", "layout", "section", "sections", "schema", "endschema", "form", "endform",
         "paginate", "endpaginate", "with", "as", "and", "or", "contains", "liquid", "echo", "comment", "endcomment",
-        "raw", "endraw", "limit", "offset", "reversed", "by", "javascript", "endjavascript", "style", "endstyle",
+        "raw", "endraw", "reversed", "by", "javascript", "endjavascript", "style", "endstyle",
     ],
     constants: &["true", "false", "nil", "null", "empty", "blank"],
     variables: &["forloop", "tablerowloop"],
@@ -1137,6 +1173,7 @@ static HANDLEBARS_SPEC: Spec = Spec {
 static HANDLEBARS_TEMPLATE: Template = Template {
     delims: &[
         delim("\\{{", "", Body::Literal),
+        delim("{{=", "}}", Body::SetDelims),
         delim("{{!--", "--}}", Body::Comment),
         delim("{{!", "}}", Body::Comment),
         delim("{{{", "}}}", Body::Helper(&HANDLEBARS_SPEC)),
@@ -1147,6 +1184,73 @@ static HANDLEBARS_TEMPLATE: Template = Template {
     mark: Kind::Punctuation,
     hook: None,
 };
+
+/// Lexes the rest of the input from the set delimiter tag at `at`, following
+/// every delimiter change. Returns the end of input.
+fn mustache<'s>(tp: &mut Tpl<'_, 's, '_>, mut at: usize, mut open: &'s [u8], mut close: &'s [u8]) -> usize {
+    let src = tp.ctx.src;
+    let len = src.len();
+    loop {
+        // `open=` new delimiters `=close`.
+        let inner = at + open.len() + 1;
+        let mut c = inner;
+        let stop = loop {
+            match tp.ctx.find(c, close) {
+                Some(p) if p > inner && src[p - 1] == b'=' => break Some(p - 1),
+                Some(p) => c = p + 1,
+                None => break None,
+            }
+        };
+        let Some(stop) = stop else {
+            tp.flush(at);
+            return len;
+        };
+        tp.flush(at);
+        let ctx = &mut *tp.ctx;
+        let end = stop + 1 + close.len();
+        ctx.emit(at, inner, Kind::Punctuation);
+        let mut parts = src[inner..stop].split(|b| b.is_ascii_whitespace()).filter(|w| !w.is_empty());
+        let (a, b) = (parts.next(), parts.next());
+        for part in [a, b].into_iter().flatten() {
+            let s = part.as_ptr() as usize - src.as_ptr() as usize;
+            ctx.emit(s, s + part.len(), Kind::String);
+        }
+        ctx.emit(stop, end, Kind::Punctuation);
+        ctx.pos = end;
+        tp.text = end;
+        if let (Some(a), Some(b), None) = (a, b, parts.next()) {
+            if !a.contains(&b'=') && !b.contains(&b'=') {
+                (open, close) = (a, b);
+            }
+        }
+        // Tags with the current delimiters, up to the next change.
+        let mut i = end;
+        loop {
+            let Some(p) = tp.ctx.find(i, open) else {
+                return len;
+            };
+            let inner = p + open.len();
+            if src.get(inner) == Some(&b'=') {
+                at = p;
+                break;
+            }
+            let c = tag_close(src, inner, close).unwrap_or(len);
+            let end = (c + close.len()).min(len);
+            tp.flush(p);
+            let ctx = &mut *tp.ctx;
+            if ctx.at(inner) == b'!' {
+                ctx.emit(p, end, Kind::Comment);
+            } else {
+                ctx.emit(p, inner, Kind::Punctuation);
+                helper(ctx, &HANDLEBARS_SPEC, inner, c);
+                ctx.emit(c, end, Kind::Punctuation);
+            }
+            ctx.pos = end;
+            tp.text = end;
+            i = end.max(p + 1);
+        }
+    }
+}
 
 /// Pipes and the bare `$` (the root context).
 fn go_template_hook(lx: &mut Lexer) -> bool {
@@ -2781,23 +2885,33 @@ fn gherkin_step(ctx: &mut Ctx, start: usize, end: usize) {
 // Indentation based templates: Pug, Haml and Slim
 
 /// Text with `#{expr}` (and `!{expr}`) interpolation in `language`.
+/// Pug (the JavaScript host) also has `#[tag text]` inline tags.
 fn interpolated_text(ctx: &mut Ctx, start: usize, end: usize, language: Language) {
     let src = ctx.src;
+    let pug = language == JS;
     let mut i = start;
-    while let Some(p) = ctx.find_in(i, end, b"{") {
-        if p == start || !matches!(src[p - 1], b'#' | b'!') || (p >= start + 2 && src[p - 2] == b'\\') {
+    while let Some(k) = src[i..end].iter().position(|&b| b == b'{' || (pug && b == b'[')) {
+        let p = i + k;
+        let tag = src[p] == b'[';
+        let opener = if tag { b"#".as_slice() } else { b"#!" };
+        if p == start || !opener.contains(&src[p - 1]) || (p >= start + 2 && src[p - 2] == b'\\') {
             i = p + 1;
             continue;
         }
-        match matching(src, p, end, true) {
-            Some(c) => {
-                ctx.emit(p - 1, p + 1, Kind::Punctuation);
-                ctx.embed(language, p + 1, c);
-                ctx.emit(c, c + 1, Kind::Punctuation);
-                i = c + 1;
-            }
-            None => break,
+        let Some(c) = matching(src, p, end, !tag) else {
+            i = p + 1;
+            continue;
+        };
+        ctx.emit(p - 1, p + 1, Kind::Punctuation);
+        if !tag {
+            ctx.embed(language, p + 1, c);
+        } else if ctx.can_nest() {
+            ctx.enter();
+            pug_inline(ctx, p + 1, c);
+            ctx.leave();
         }
+        ctx.emit(c, c + 1, Kind::Punctuation);
+        i = c + 1;
     }
     ctx.pos = ctx.pos.max(end);
 }
@@ -3065,6 +3179,45 @@ fn pug_tag(ctx: &mut Ctx, mut p: usize, mut line_end: usize, mut end: usize, ind
             ctx.embed(JS, p + 2, line_end);
         }
         _ => interpolated_text(ctx, p, line_end, JS),
+    }
+}
+
+/// The inside of an inline tag: `#[strong.big(title="x") text]`.
+fn pug_inline(ctx: &mut Ctx, mut p: usize, end: usize) {
+    let src = ctx.src;
+    let mut selector = true;
+    while p < end {
+        let b = src[p];
+        if selector && b.is_ascii_alphabetic() {
+            let e = tag_name_end(ctx, p, end);
+            ctx.emit(p, e, Kind::Tag);
+            p = e;
+        } else if matches!(b, b'.' | b'#') && (is_ident_start(ctx.at(p + 1)) || ctx.at(p + 1) == b'-') {
+            let e = name_end(ctx, p + 1, b"-").min(end);
+            ctx.emit(p, e, Kind::Attribute);
+            p = e;
+        } else if b == b'(' {
+            let Some(close) = matching(src, p, end, true) else {
+                break;
+            };
+            attribute_list(ctx, p, close, JS);
+            p = close + 1;
+        } else {
+            break;
+        }
+        selector = false;
+    }
+    ctx.pos = ctx.pos.max(p);
+    let op = match ctx.at(p) {
+        b'=' => 1,
+        b'!' if ctx.at(p + 1) == b'=' => 2,
+        _ => 0,
+    };
+    if op > 0 && p < end {
+        ctx.emit(p, p + op, Kind::Punctuation);
+        ctx.embed(JS, p + op, end);
+    } else {
+        interpolated_text(ctx, p, end, JS);
     }
 }
 

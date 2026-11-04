@@ -405,3 +405,67 @@ fn roff_texinfo_and_pod() {
         ],
     );
 }
+
+#[test]
+fn liquid_tag_and_comment_tag() {
+    let code = "{% # note %}{% liquid\n  # pick\n  assign n = list | size\n  echo n\n%}";
+    assert_tokens(
+        "liquid",
+        code,
+        &[
+            ("{% # note %}", Comment),
+            ("liquid", Keyword),
+            ("# pick", Comment),
+            ("assign", Keyword),
+            ("size", Function),
+            ("echo", Keyword),
+        ],
+    );
+    // Named parameters read as keys.
+    let code = "{% for p in list limit: 2 offset: 1 %}";
+    assert_tokens("liquid", code, &[("limit", Property), ("offset", Property)]);
+}
+
+#[test]
+fn mustache_delimiter_changes() {
+    let code = "{{a}} {{=<% %>=}} <% b %> {{c}} <%! note %><%={{ }}=%>{{#d}}";
+    assert_tokens(
+        "mustache",
+        code,
+        &[
+            ("{{=", Punctuation),
+            ("<%", String),
+            ("%>", String),
+            ("=}}", Punctuation),
+            ("b", Text),
+            ("{{c}}", Text),
+            ("<%! note %>", Comment),
+            ("#d", Keyword),
+        ],
+    );
+    // An unclosed change leaves the rest as text.
+    assert_not("mustache", "{{=<% %> <% x %>", "<%", Punctuation);
+}
+
+#[test]
+fn pug_inline_tags() {
+    let code = "p Text #[em.big(title=t) word #{x}] and #[b= y] \\#[no]";
+    assert_tokens(
+        "pug",
+        code,
+        &[
+            ("#[", Punctuation),
+            ("em", Tag),
+            (".big", Attribute),
+            ("title", Attribute),
+            ("word", Text),
+            ("#{", Punctuation),
+            ("x", Text),
+            ("}]", Punctuation),
+            ("b", Tag),
+            ("=", Punctuation),
+            ("y", Text),
+        ],
+    );
+    assert_not("pug", "p a \\#[no] b", "no", Tag);
+}

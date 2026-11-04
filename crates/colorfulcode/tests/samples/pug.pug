@@ -26,7 +26,7 @@ html(lang="en")
     else
       p.empty No users at all.
     a(href="/users/new" title='New user') Add user
-    p: em Inline nesting with #[strong a tag] inside.
+    p: em Inline nesting with #[strong a tag] and #[a.link(href=url) #{label}] inside.
     | Plain text with #{count} items
     case role
       when "admin"
