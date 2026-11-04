@@ -220,7 +220,12 @@ It covers JavaScript, TypeScript, JSX, TSX, HTML, CSS, SCSS, Less, Sass, JSON, M
 
 ## Benchmarks
 
-HTML output for about 100 KB of code per language, measured in Node 22 (`bench/compare.mjs`):
+<p align="center">
+  <img src="assets/race.gif" alt="colorfulcode, highlight.js, Prism and Shiki highlighting the same 200 KB of TypeScript" width="760">
+</p>
+
+The race above is measured in Chromium and replayed in real time (`cd bench && npm run race` runs it in your browser).
+In Node 22, HTML output for about 100 KB of code per language (`bench/compare.mjs`):
 
 __BENCH__
 

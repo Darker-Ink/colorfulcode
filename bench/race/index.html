@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Highlighter race</title>
+    <link rel="icon" href="data:," />
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Fredoka:wght@600&family=Inter:wght@400;600&family=JetBrains+Mono&display=swap");
+      body { margin: 0; background: #0b0c12; color: #e4e6f1; font-family: Inter, system-ui, sans-serif; }
+      main { box-sizing: border-box; width: 860px; padding: 36px 40px 40px; }
+      h1 { font-family: Fredoka, sans-serif; font-size: 30px; margin: 0 0 4px; }
+      p { margin: 0 0 28px; color: #9aa0bd; font-size: 15px; }
+      .lane { display: grid; grid-template-columns: 130px 1fr 170px; align-items: center; gap: 16px; margin: 16px 0; }
+      .name { font-weight: 600; font-size: 16px; }
+      .track { height: 26px; border-radius: 13px; background: #1b1d29; overflow: hidden; }
+      .bar { height: 100%; width: 0; border-radius: 13px; }
+      .time { font: 15px "JetBrains Mono", monospace; text-align: right; color: #9aa0bd; font-variant-numeric: tabular-nums; }
+      .done .time { color: #e4e6f1; }
+      .slower { color: #ff8fa3; font-size: 13px; margin-left: 6px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Highlighting <span id="size"></span> of TypeScript to HTML</h1>
+      <p id="note">Measuring in this browser...</p>
+      <div id="lanes"></div>
+    </main>
+    <script type="module" src="./race.js"></script>
+  </body>
+</html>
