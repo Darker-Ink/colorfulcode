@@ -1,3 +1,5 @@
+//! Conversion of token offsets to UTF-16 code units.
+
 use crate::Token;
 
 /// Converts UTF-8 byte offsets to UTF-16 code unit offsets.

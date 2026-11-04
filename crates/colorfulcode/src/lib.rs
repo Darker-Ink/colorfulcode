@@ -25,7 +25,7 @@ mod kind;
 mod languages;
 mod lexer;
 mod theme;
-mod utf16;
+pub mod utf16;
 
 pub use kind::Kind;
 pub use languages::Language;

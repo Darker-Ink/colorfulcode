@@ -17,6 +17,8 @@ pub struct Options<'a> {
     /// Wrap every line in `<span class="cc-line">`. Needed for line numbers
     /// and line highlights.
     pub lines: bool,
+    /// Prefix every line with its number in a `cc-ln` span. Implies `lines`.
+    pub line_numbers: bool,
     /// One based line numbers that get the extra `cc-hl` class. Implies `lines`.
     pub highlight_lines: &'a [u32],
 }
@@ -24,7 +26,7 @@ pub struct Options<'a> {
 /// Renders tokens produced by [`crate::highlight`] as HTML.
 pub fn render(code: &str, tokens: &[Token], options: &Options) -> String {
     let mut out = String::with_capacity(code.len() * 2 + 64);
-    let lines = options.lines || !options.highlight_lines.is_empty();
+    let lines = options.lines || options.line_numbers || !options.highlight_lines.is_empty();
     if options.wrap {
         match options.theme {
             Some(t) => {
@@ -37,7 +39,8 @@ pub fn render(code: &str, tokens: &[Token], options: &Options) -> String {
             None => out.push_str("<pre class=\"cc\"><code>"),
         }
     }
-    let mut writer = Writer { out, theme: options.theme, highlight: options.highlight_lines, line: 1, lines };
+    let gutter = if options.line_numbers { digits(code.bytes().filter(|&b| b == b'\n').count() + 1) } else { 0 };
+    let mut writer = Writer { out, theme: options.theme, highlight: options.highlight_lines, line: 1, lines, gutter };
     if lines {
         writer.open_line();
     }
@@ -71,6 +74,8 @@ struct Writer<'a> {
     highlight: &'a [u32],
     line: u32,
     lines: bool,
+    /// Width of the line number gutter in digits, or 0 for none.
+    gutter: usize,
 }
 
 /// What a kind renders as; equal keys can be merged.
@@ -98,10 +103,27 @@ impl Writer<'_> {
     }
 
     fn open_line(&mut self) {
-        if self.highlight.contains(&self.line) {
-            self.out.push_str("<span class=\"cc-line cc-hl\">");
-        } else {
-            self.out.push_str("<span class=\"cc-line\">");
+        let highlighted = self.highlight.contains(&self.line);
+        self.out.push_str(if highlighted { "<span class=\"cc-line cc-hl\"" } else { "<span class=\"cc-line\"" });
+        if let (Some(theme), true) = (self.theme, highlighted) {
+            let c = theme.foreground;
+            let _ = write!(
+                self.out,
+                " style=\"display:inline-block;width:100%;background:rgba({},{},{},0.1)\"",
+                c.r, c.g, c.b
+            );
+        }
+        self.out.push('>');
+        if self.gutter > 0 {
+            self.out.push_str("<span class=\"cc-ln\"");
+            if self.theme.is_some() {
+                let _ = write!(
+                    self.out,
+                    " style=\"display:inline-block;min-width:{}ch;margin-right:2ch;text-align:right;opacity:0.45;user-select:none\"",
+                    self.gutter
+                );
+            }
+            let _ = write!(self.out, ">{}</span>", self.line);
         }
     }
 
@@ -151,6 +173,15 @@ impl Writer<'_> {
             }
         }
     }
+}
+
+fn digits(mut n: usize) -> usize {
+    let mut d = 1;
+    while n >= 10 {
+        n /= 10;
+        d += 1;
+    }
+    d
 }
 
 /// Appends `text` with `&`, `<`, `>`, `"` and `'` escaped.

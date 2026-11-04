@@ -1,0 +1,12 @@
+/* Base styles for the class based output (theme: false). Pair with a theme from colorfulcode/themes. */
+.cc { padding: 1em; overflow-x: auto; border-radius: 0.5em; tab-size: 4; }
+.cc .cc-line { display: inline-block; min-width: 100%; }
+.cc .cc-hl { background: rgb(127 127 127 / 15%); }
+.cc .cc-ln {
+  display: inline-block;
+  min-width: 3ch;
+  margin-right: 2ch;
+  text-align: right;
+  opacity: 0.45;
+  user-select: none;
+}

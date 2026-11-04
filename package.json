@@ -1,0 +1,12 @@
+{
+  "name": "colorfulcode-repo",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run build -w colorfulcode",
+    "test": "npm test -w colorfulcode"
+  },
+  "devDependencies": {
+    "binaryen": "^132.0.0"
+  }
+}

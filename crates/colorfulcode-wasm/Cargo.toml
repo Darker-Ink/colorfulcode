@@ -1,0 +1,15 @@
+[package]
+name = "colorfulcode-wasm"
+description = "WebAssembly build of colorfulcode used by the npm package"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+colorfulcode.workspace = true
