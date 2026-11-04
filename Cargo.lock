@@ -7,6 +7,20 @@ name = "colorfulcode"
 version = "0.1.0"
 
 [[package]]
+name = "colorfulcode-cli"
+version = "0.1.0"
+dependencies = [
+ "colorfulcode",
+]
+
+[[package]]
+name = "colorfulcode-ffi"
+version = "0.1.0"
+dependencies = [
+ "colorfulcode",
+]
+
+[[package]]
 name = "colorfulcode-wasm"
 version = "0.1.0"
 dependencies = [

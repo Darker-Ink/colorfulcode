@@ -1,0 +1,16 @@
+[package]
+name = "colorfulcode-ffi"
+description = "C ABI for the colorfulcode syntax highlighter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["syntax", "highlighting", "ffi"]
+categories = ["text-processing", "external-ffi-bindings"]
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+colorfulcode.workspace = true

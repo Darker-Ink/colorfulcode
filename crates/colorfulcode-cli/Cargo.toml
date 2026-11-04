@@ -1,0 +1,19 @@
+[package]
+name = "colorfulcode-cli"
+description = "Print files with syntax highlighting in the terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["syntax", "highlighting", "cli", "terminal"]
+categories = ["command-line-utilities", "text-processing"]
+
+[[bin]]
+name = "colorfulcode"
+path = "src/main.rs"
+# Avoids a doc output collision with the `colorfulcode` library.
+doc = false
+
+[dependencies]
+colorfulcode.workspace = true
