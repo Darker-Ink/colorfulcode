@@ -43,8 +43,17 @@ fn main() {
     let code = std::fs::read_to_string(format!("{dir}/tsx.tsx")).unwrap().repeat(800);
     let lang = Language::find("tsx").unwrap();
     highlight_into(&code, lang, &mut tokens);
-    let start = Instant::now();
-    let out = html::render(&code, &tokens, &html::Options::default());
-    let elapsed = start.elapsed();
-    println!("html render: {:.1} MB/s ({} bytes out)", code.len() as f64 / elapsed.as_secs_f64() / 1e6, out.len());
+    for (label, options) in [
+        ("classes", html::Options::default()),
+        ("inline styles", html::Options { theme: Some(&colorfulcode::Theme::default()), ..Default::default() }),
+    ] {
+        let mut best = Duration::MAX;
+        let mut len = 0;
+        for _ in 0..5 {
+            let start = Instant::now();
+            len = html::render(&code, &tokens, &options).len();
+            best = best.min(start.elapsed());
+        }
+        println!("html render, {label}: {:.1} MB/s ({len} bytes out)", code.len() as f64 / best.as_secs_f64() / 1e6);
+    }
 }

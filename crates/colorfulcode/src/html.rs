@@ -25,7 +25,7 @@ pub struct Options<'a> {
 
 /// Renders tokens produced by [`crate::highlight`] as HTML.
 pub fn render(code: &str, tokens: &[Token], options: &Options) -> String {
-    let mut out = String::with_capacity(code.len() * 2 + 64);
+    let mut out = String::new();
     let lines = options.lines || options.line_numbers || !options.highlight_lines.is_empty();
     if options.wrap {
         match options.theme {
@@ -43,6 +43,16 @@ pub fn render(code: &str, tokens: &[Token], options: &Options) -> String {
     let body = if lines { code.strip_suffix('\n').unwrap_or(code) } else { code };
     let gutter = if options.line_numbers { digits(body.bytes().filter(|&b| b == b'\n').count() + 1) } else { 0 };
     let mut writer = Writer::new(out, options, lines, gutter);
+    // Reserve roughly the final size up front: inline styles make the output
+    // several times larger than the input, and regrowing means copying it all.
+    let tags: usize = tokens
+        .iter()
+        .map(|t| match writer.group[t.kind as usize] {
+            0 => 0,
+            g => writer.open[g as usize].len() + "</span>".len(),
+        })
+        .sum();
+    writer.out.reserve(code.len() + code.len() / 16 + tags + 64);
     if lines {
         writer.open_line();
     }
