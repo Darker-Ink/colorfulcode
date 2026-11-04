@@ -4,6 +4,10 @@ Option Explicit
 ' Builds a summary sheet from raw data
 Private Const MAX_ROWS As Long = 10000
 
+Private Type Point
+    X As LongPtr
+End Type
+
 Public Sub BuildSummary()
     Dim ws As Worksheet
     Dim lastRow As Long, i As Long

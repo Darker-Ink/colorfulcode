@@ -26,6 +26,7 @@ assoc[["a"]] + Lookup[assoc, "b", Missing["NotFound"]]
 f = Function[{x, y}, x^y];
 rules = {x_ -> x + 1, {a__, b_} :> {b, a}};
 $RecursionLimit = 4096;
+angle[\[Theta]_] := \[Theta] \[Degree] \[Rule] "\[Alpha] and \:03b2"
 Solve[x^2 - 2 == 0, x] /. {x -> Sqrt[2]}
 If[True && !False, "yes\n", Null]
 

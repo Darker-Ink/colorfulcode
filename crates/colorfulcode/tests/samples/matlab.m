@@ -30,6 +30,8 @@ s.name = 'it''s';
 fprintf('mu = %.3f, sigma = %.3f\n', mu, sigma);  % trailing comment
 x = linspace(0, 2*pi, 100); ...
     plot(x, sin(x));
+hold on; grid minor
+format long
 end
 
 function out = helper(x)
