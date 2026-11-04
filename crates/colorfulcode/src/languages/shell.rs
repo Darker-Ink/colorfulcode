@@ -404,9 +404,7 @@ const PS_OPERATORS: &[&str] = &[
 fn ps_variable(ctx: &Ctx, start: usize) -> Option<(usize, Kind)> {
     let next = ctx.at(start + 1);
     if next == b'{' {
-        let le = ctx.line_end(start);
-        let end = ctx.src[start..le].iter().position(|&b| b == b'}').map_or(le, |i| start + i + 1);
-        return Some((end, Kind::Variable));
+        return Some((braced_end(ctx, start), Kind::Variable));
     }
     if matches!(next, b'_' | b'$' | b'?' | b'^') && !is_ident(ctx.at(start + 2)) {
         return Some((start + 2, Kind::Variable));
@@ -844,22 +842,24 @@ fn docker_instruction(ctx: &mut Ctx, mut start: usize, end: usize) {
             start = args;
             continue;
         }
-        match () {
-            _ if is(b"run") || is(b"cmd") || is(b"entrypoint") => return docker_shell(ctx, args, end),
-            _ if is(b"healthcheck") => {
-                let upper = ctx.find(args, b" CMD ").filter(|&i| i < end);
-                let lower = ctx.find(args, b" cmd ").filter(|&i| i < end);
-                match upper.or(lower) {
-                    Some(i) => {
-                        ctx.embed_spec(&DOCKER_SPEC, args, i);
-                        ctx.emit(i + 1, i + 4, Kind::Keyword);
-                        return docker_shell(ctx, i + 5, end);
-                    }
-                    None => return ctx.embed_spec(&DOCKER_SPEC, args, end),
+        if is(b"run") || is(b"cmd") || is(b"entrypoint") {
+            docker_shell(ctx, args, end);
+        } else if is(b"healthcheck") {
+            // `HEALTHCHECK --interval=5s CMD curl ...`
+            let upper = ctx.find(args, b" CMD ").filter(|&i| i < end);
+            let lower = ctx.find(args, b" cmd ").filter(|&i| i < end);
+            match upper.or(lower) {
+                Some(i) => {
+                    ctx.embed_spec(&DOCKER_SPEC, args, i);
+                    ctx.emit(i + 1, i + 4, Kind::Keyword);
+                    docker_shell(ctx, i + 5, end);
                 }
+                None => ctx.embed_spec(&DOCKER_SPEC, args, end),
             }
-            _ => return ctx.embed_spec(&DOCKER_SPEC, args, end),
+        } else {
+            ctx.embed_spec(&DOCKER_SPEC, args, end);
         }
+        return;
     }
 }
 
@@ -994,12 +994,7 @@ fn make_dollar(lx: &mut Lexer) -> bool {
         }
         b'$' => {
             // `$$` passes a literal `$` to the shell: `$$HOME`, `$${name}`.
-            let end = if ctx.at(start + 2) == b'{' {
-                let le = ctx.line_end(start);
-                ctx.src[start..le].iter().position(|&b| b == b'}').map_or(le, |i| start + i + 1)
-            } else {
-                scan(ctx, start + 2, is_ident)
-            };
+            let end = if ctx.at(start + 2) == b'{' { braced_end(ctx, start) } else { scan(ctx, start + 2, is_ident) };
             ctx.emit(start, end, Kind::Variable);
             ctx.pos = end;
             lx.mark_value();
@@ -1470,10 +1465,7 @@ fn apache_hook(lx: &mut Lexer) -> bool {
         }
         b'%' | b'$' => {
             let end = match next {
-                b'{' => {
-                    let le = ctx.line_end(start);
-                    ctx.src[start..le].iter().position(|&b| b == b'}').map_or(le, |i| start + i + 1)
-                }
+                b'{' => braced_end(ctx, start),
                 b'0'..=b'9' => start + 2,
                 _ => return false,
             };
@@ -1992,10 +1984,7 @@ fn ninja_hook(lx: &mut Lexer) -> bool {
     }
     let next = ctx.peek_at(1);
     let (end, kind) = match next {
-        b'{' => {
-            let le = ctx.line_end(start);
-            (ctx.src[start..le].iter().position(|&b| b == b'}').map_or(le, |i| start + i + 1), Kind::Variable)
-        }
+        b'{' => (braced_end(ctx, start), Kind::Variable),
         b'$' | b' ' | b':' | b'\n' => (start + 2, Kind::Escape),
         b'\r' => (start + 2 + (ctx.at(start + 2) == b'\n') as usize, Kind::Escape),
         _ if is_ident(next) => (scan(ctx, start + 1, |b| is_ident(b) || b == b'-'), Kind::Variable),
@@ -2675,7 +2664,7 @@ fn xonsh_hook(lx: &mut Lexer) -> bool {
     ctx.token(open_len, Kind::Punctuation);
     if shell {
         let end = closing(ctx, open, ctx.len()).unwrap_or(ctx.len());
-        shell_command(ctx, open + 1, end, &BASH_SPEC);
+        shell_command(ctx, open + 1, end, &XONSH_SUBPROC_SPEC);
     } else {
         lx.nested(close);
     }
@@ -2685,6 +2674,27 @@ fn xonsh_hook(lx: &mut Lexer) -> bool {
     lx.mark_value();
     true
 }
+
+/// Python injection `@(expr)` inside subprocess mode.
+fn xonsh_subproc_hook(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    if ctx.peek() != b'@' {
+        return bash_hook(lx);
+    }
+    if ctx.peek_at(1) != b'(' {
+        return false;
+    }
+    let end = closing(ctx, start + 1, ctx.len()).unwrap_or(ctx.len());
+    ctx.emit(start, start + 2, Kind::Punctuation);
+    ctx.embed_spec(&XONSH_SPEC, start + 2, end);
+    ctx.emit(end, end + 1, Kind::Punctuation);
+    ctx.pos = (end + 1).min(ctx.len());
+    lx.mark_value();
+    true
+}
+
+static XONSH_SUBPROC_SPEC: Spec = Spec { hook: Some(xonsh_subproc_hook), hook_chars: "#$<@", ..BASH_RULES };
 
 static XONSH_SPEC: Spec = Spec {
     line_comments: &["#"],
