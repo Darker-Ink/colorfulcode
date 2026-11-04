@@ -46,6 +46,6 @@ struct TodoRow: View {
 }
 
 #if DEBUG
-let pattern = #"\d+ "quoted""#
+let pattern = #"\d+ "quoted" \#(ratio)\#n"#
 let ratio = 0.5e-3 + Double(0xFF)
 #endif

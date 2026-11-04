@@ -33,6 +33,7 @@ object Shapes {
     val shapes: Seq[Shape] = Seq(Circle(1.5), Rect(2, 3))
     shapes.map(describe).foreach(println)
     val raw = """no \n escapes here"""
+    val path = raw"C:\temp\$raw"
     val c = 'x'
     val nl = '\n'
     println(sum(List(1, 2, 3)) + 0xFF + raw.length)

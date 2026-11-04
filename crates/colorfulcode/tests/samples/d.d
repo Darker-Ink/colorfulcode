@@ -50,6 +50,7 @@ void main(string[] args)
 {
     auto squares = [1, 2, 3].map!(x => x * x).sum;
     string raw = r"C:\temp\" ~ `no\escapes`;
+    immutable code = q{ int y = x * 2; } ~ q"(nested (parens))";
     char c = '\n';
     writefln("squares = %d, args = %s%c", squares, args.length.to!string, c);
     writeln(raw, 0xFF_FF, 3.14e-2);
