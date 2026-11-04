@@ -234,7 +234,8 @@ impl<'c, 's, 'o> Css<'c, 's, 'o> {
             return Part::Declaration;
         }
         if self.dialect == Dialect::Indented {
-            let end = self.ctx.line_end(self.ctx.pos);
+            // Only the start of the line matters, and bounding it keeps one huge line linear.
+            let end = self.ctx.line_end_within(self.ctx.pos, 256);
             let line = &src[self.ctx.pos..end];
             // `prop: value` or `prop value` (Stylus) vs `a:hover` or `.class`.
             let colon_space = line.windows(2).any(|w| w == b": ");

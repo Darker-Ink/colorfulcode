@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  Fast syntax highlighting for __LANGS__ languages, written in Rust.<br>
+  Fast syntax highlighting for 200 languages, written in Rust.<br>
   Use it from React, plain JavaScript, native apps or the terminal.
 </p>
 
@@ -18,7 +18,7 @@
 ## Why
 
 - **Fast.** Over 200 MB/s natively and around 45 MB/s from JavaScript including HTML output. That is 10 to 30 times faster than highlight.js and Prism and over 100 times faster than Shiki ([benchmarks](#benchmarks)).
-- **Lots of languages.** __LANGS__ languages, including embedded ones: scripts and styles in HTML, fenced code in Markdown, Vue and Svelte components, and TSX with generic arrow functions.
+- **Lots of languages.** 200 languages, including embedded ones: scripts and styles in HTML, fenced code in Markdown, Vue and Svelte components, and TSX with generic arrow functions.
 - **Small.** One __WASM__ KiB WebAssembly module (__GZIP__ KiB gzipped) with no dependencies.
 - **Zero setup.** Synchronous, so it works in SSR, React Server Components, Node, Deno, Bun and every bundler without configuration.
 - **Easy to render anywhere.** The output is a flat list of `(start, end, kind)` tokens plus theme colors, so native UIs can colorize text in a few lines.
@@ -209,7 +209,7 @@ Native apps usually skip themes altogether and map each kind to colors from thei
 
 ## Smaller build
 
-`colorfulcode` includes every language (__WASM__ KiB, __GZIP__ KiB gzipped). If you only need the popular ones, `colorfulcode/common` has __COMMON_LANGS__ of them (__COMMON_WASM__ KiB, __COMMON_GZIP__ KiB gzipped) with the same API:
+`colorfulcode` includes every language (__WASM__ KiB, __GZIP__ KiB gzipped). If you only need the popular ones, `colorfulcode/common` has 55 of them (__COMMON_WASM__ KiB, __COMMON_GZIP__ KiB gzipped) with the same API:
 
 ```js
 import { highlight } from "colorfulcode/common";
@@ -234,9 +234,9 @@ The core alone tokenizes at __NATIVE__ MB/s on average across all sample files (
 ## Languages
 
 <details>
-<summary>All __LANGS__ languages</summary>
+<summary>All 200 languages</summary>
 
-__LANGUAGE_LIST__
+ABAP, ActionScript, Ada, Agda, Alloy, Apache, Apex, APL, AppleScript, ARM Assembly, AsciiDoc, Assembly, Astro, AutoHotkey, AWK, Bash, BASIC, Batch, BibTeX, Blade, C, C#, C++, Caddyfile, Carbon, Clojure, CMake, COBOL, CoffeeScript, Common Lisp, Coq, crontab, Crystal, CSS, CSV, CUDA, CUE, Cypher, D, Dart, DAX, Diff, Dockerfile, DOT, Dotenv, EJS, Elixir, Elm, Emacs Lisp, ERB, Erlang, F#, Fennel, fish, Forth, Fortran, G-code, GDScript, Gherkin, Git Attributes, Git Config, Gleam, GLSL, GNU Assembler, Go, Go Template, Grain, GraphQL, Groovy, Haml, Handlebars, Hare, Haskell, Haxe, HCL, HLSL, HTML, HTTP, Hy, Idris, Ignore List, INI, Janet, Java, JavaScript, Jinja, JSON, JSON with Comments, JSON5, Jsonnet, JSX, Julia, Just, KDL, Koka, Kotlin, Kusto, LaTeX, Lean, Less, Liquid, LiveScript, LLVM IR, Log, Lua, Makefile, Markdown, MATLAB, MDX, Mermaid, Meson, Mojo, MoonScript, MQL, nginx, Nim, Ninja, Nix, Nushell, Objective-C, OCaml, Odin, OpenSCAD, Org, Pascal, Perl, PHP, Plain Text, PlantUML, Pod, Pony, PowerShell, Prisma, Procfile, Prolog, Properties, Protocol Buffers, Pug, PureScript, Python, QML, R, Racket, Raku, Razor, Reason, Regular Expression, reStructuredText, RISC-V Assembly, Roc, Roff, Ruby, Rust, SAS, Sass, Scala, Scheme, SCSS, Slim, Smalltalk, Solidity, SPARQL, SQL, Squirrel, SSH Config, Standard ML, Stata, Stylus, Svelte, SVG, Swift, systemd Unit, SystemVerilog, Tcl, Texinfo, Thrift, TLA+, TOML, TSV, TSX, Twig, TypeScript, Typst, Unison, V, Vala, VBA, Verilog, VHDL, Vim Script, Visual Basic .NET, Vue, WebAssembly Text, WGSL, Wolfram Language, Wren, XML, Xonsh, YAML, Zig
 
 </details>
 

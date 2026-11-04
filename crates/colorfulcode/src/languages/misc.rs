@@ -2424,8 +2424,12 @@ fn gcode(ctx: &mut Ctx) {
                 ctx.emit_from(start, Kind::Comment);
             }
             b'(' => {
-                let line_end = ctx.line_end(start);
-                let end = ctx.src[start..line_end].iter().position(|&c| c == b')').map_or(line_end, |i| start + i + 1);
+                // One scan to `)` or the line end keeps long lines linear.
+                let end = match ctx.src[start..].iter().position(|&c| c == b')' || c == b'\n') {
+                    Some(i) if ctx.src[start + i] == b')' => start + i + 1,
+                    Some(i) => start + i,
+                    None => ctx.len(),
+                };
                 put(ctx, start, end, Kind::Comment);
             }
             b'%' => ctx.token(1, Kind::Meta),
@@ -2434,9 +2438,11 @@ fn gcode(ctx: &mut Ctx) {
                 put(ctx, start, end.max(start + 1), Kind::Variable);
             }
             b'"' => {
-                let line_end = ctx.line_end(start);
-                let end =
-                    ctx.src[start + 1..line_end].iter().position(|&c| c == b'"').map_or(line_end, |i| start + i + 2);
+                let end = match ctx.src[start + 1..].iter().position(|&c| c == b'"' || c == b'\n') {
+                    Some(i) if ctx.src[start + 1 + i] == b'"' => start + i + 2,
+                    Some(i) => start + 1 + i,
+                    None => ctx.len(),
+                };
                 put(ctx, start, end, Kind::String);
             }
             b'0'..=b'9' | b'.' => {
@@ -2586,10 +2592,10 @@ pub static KUSTO: Definition =
 fn dax_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
-    let line_end = ctx.line_end(start);
+    // Scans to the closing quote or the end of the line, whichever comes first.
     let close = |ctx: &Ctx, q: u8| {
         let mut i = start + 1;
-        while i < line_end {
+        while i < ctx.len() && ctx.src[i] != b'\n' {
             if ctx.src[i] == q {
                 if ctx.at(i + 1) == q {
                     i += 2;
@@ -2599,7 +2605,7 @@ fn dax_hook(lx: &mut Lexer) -> bool {
             }
             i += 1;
         }
-        line_end
+        i
     };
     match ctx.peek() {
         b'[' => {

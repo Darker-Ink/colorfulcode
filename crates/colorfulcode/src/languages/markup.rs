@@ -668,6 +668,9 @@ fn fenced_code(ctx: &mut Ctx, at: usize, end: usize, fence_char: u8, fence_len: 
 fn inline(ctx: &mut Ctx, start: usize, end: usize) {
     let mut i = start;
     let src = ctx.src;
+    // Inline constructs are short. Bounding every search for a closing
+    // delimiter keeps long lines full of unclosed ones linear.
+    let window = |from: usize| (from + 512).min(end).max(from.min(end));
     while i < end {
         let b = src[i];
         match b {
@@ -678,7 +681,7 @@ fn inline(ctx: &mut Ctx, start: usize, end: usize) {
             b'`' => {
                 let ticks = src[i..end].iter().take_while(|&&c| c == b'`').count();
                 let fence = &src[i..i + ticks];
-                match ctx.find(i + ticks, fence).filter(|&p| p < end) {
+                match ctx.find_in(i + ticks, window(i), fence) {
                     Some(p) => {
                         ctx.emit(i, p + ticks, Kind::String);
                         i = p + ticks;
@@ -696,7 +699,7 @@ fn inline(ctx: &mut Ctx, start: usize, end: usize) {
                     continue;
                 }
                 let delim = &src[i..i + run.min(3)];
-                match ctx.find(i + delim.len(), delim).filter(|&p| p < end && !matches!(src[p - 1], b' ' | b'\t')) {
+                match ctx.find_in(i + delim.len(), window(i), delim).filter(|&p| !matches!(src[p - 1], b' ' | b'\t')) {
                     Some(p) => {
                         let kind = match (b, delim.len()) {
                             (b'~', _) => Kind::Deleted,
@@ -715,13 +718,14 @@ fn inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i += 1;
                     continue;
                 }
-                let Some(close) = bracket_end(src, open, end) else {
+                let Some(close) = bracket_end(src, open, window(open)) else {
                     i += 1;
                     continue;
                 };
                 match src.get(close + 1) {
                     Some(b'(') => {
-                        let url_end = src[close + 1..end].iter().position(|&c| c == b')').map(|p| close + 1 + p);
+                        let url_end =
+                            src[close + 1..window(close + 1)].iter().position(|&c| c == b')').map(|p| close + 1 + p);
                         let Some(url_end) = url_end else {
                             i += 1;
                             continue;
@@ -734,7 +738,8 @@ fn inline(ctx: &mut Ctx, start: usize, end: usize) {
                         i = url_end + 1;
                     }
                     Some(b'[') => {
-                        let ref_end = src[close + 1..end].iter().position(|&c| c == b']').map(|p| close + 1 + p);
+                        let ref_end =
+                            src[close + 1..window(close + 1)].iter().position(|&c| c == b']').map(|p| close + 1 + p);
                         let Some(ref_end) = ref_end else {
                             i += 1;
                             continue;
@@ -751,7 +756,7 @@ fn inline(ctx: &mut Ctx, start: usize, end: usize) {
             }
             b'<' => {
                 // Autolinks and inline HTML.
-                let close = src[i..end].iter().position(|&c| c == b'>').map(|p| i + p);
+                let close = src[i..window(i)].iter().position(|&c| c == b'>').map(|p| i + p);
                 match close {
                     Some(c) if src[i + 1..c].starts_with(b"http") || src[i + 1..c].contains(&b'@') => {
                         ctx.emit(i, i + 1, Kind::Punctuation);
