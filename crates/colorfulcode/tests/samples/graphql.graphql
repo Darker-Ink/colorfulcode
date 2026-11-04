@@ -1,0 +1,51 @@
+# Schema definition
+schema {
+  query: Query
+  mutation: Mutation
+}
+
+"""
+A user of the service.
+"""
+type User implements Node @key(fields: "id") {
+  id: ID!
+  name: String
+  age: Int
+  score: Float @deprecated(reason: "Use \"rating\" instead")
+  role: Role!
+  friends(first: Int = 10, after: String): [User!]!
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+  GUEST
+}
+
+input CreateUserInput {
+  name: String!
+  active: Boolean = true
+}
+
+union SearchResult = User | Post
+
+scalar DateTime
+
+query GetUser($id: ID!, $withFriends: Boolean = false) {
+  user(id: $id) {
+    ...UserFields
+    friends(first: 5) @include(if: $withFriends) {
+      name
+    }
+  }
+}
+
+fragment UserFields on User {
+  id
+  name
+  avatar: profilePicture(size: 64)
+}
+
+mutation {
+  createUser(input: { name: "Ada", active: true }) { id }
+}

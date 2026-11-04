@@ -5,7 +5,10 @@ use crate::lexer::generic::{escape_len, features::*, Interp, Lexer, Prefix, Spec
 use crate::lexer::{is_ident, is_ident_start, Ctx};
 use crate::Kind;
 
-pub static LANGUAGES: &[&Definition] = &[&YAML, &TOML, &INI, &PROPERTIES, &DOTENV, &CSV, &TSV];
+pub static LANGUAGES: &[&Definition] = &[
+    &YAML, &TOML, &INI, &PROPERTIES, &DOTENV, &CSV, &TSV, &SQL, &GRAPHQL, &DIFF, &PROTOBUF, &THRIFT, &HCL, &PRISMA,
+    &HTTP,
+];
 
 // Shared helpers
 
@@ -945,4 +948,594 @@ fn columns(ctx: &mut Ctx, mut sep: u8) {
             }
         }
     }
+}
+
+// SQL
+
+/// Dollar quoted bodies (`$$ ... $$`, `$fn$ ... $fn$`), parameters (`$1`,
+/// `:name`), `::` casts and bracketed identifiers (`[Order Details]`).
+fn sql_hook(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    match ctx.peek() {
+        b'$' => {
+            let next = ctx.peek_at(1);
+            if next.is_ascii_digit() {
+                let mut end = start + 1;
+                while ctx.at(end).is_ascii_digit() {
+                    end += 1;
+                }
+                ctx.pos = end;
+                ctx.emit(start, end, Kind::Variable);
+                lx.mark_value();
+                return true;
+            }
+            let mut tag_end = start + 1;
+            while is_ident(ctx.at(tag_end)) && tag_end - start < 64 {
+                tag_end += 1;
+            }
+            if ctx.at(tag_end) != b'$' {
+                return false;
+            }
+            let tag = &ctx.src[start..=tag_end];
+            let end = ctx.find(tag_end + 1, tag).map_or(ctx.len(), |p| p + tag.len());
+            ctx.pos = end;
+            ctx.emit(start, end, Kind::String);
+            lx.mark_value();
+            true
+        }
+        b'[' => {
+            if start > 0 && (is_ident(ctx.src[start - 1]) || matches!(ctx.src[start - 1], b')' | b']')) {
+                return false;
+            }
+            let line_end = ctx.line_end(start);
+            let Some(close) = ctx.src[start..line_end].iter().position(|&b| b == b']') else {
+                return false;
+            };
+            let inner = &ctx.src[start + 1..start + close];
+            if inner.is_empty() || !inner.iter().all(|&b| is_ident(b) || matches!(b, b' ' | b'-' | b'$' | b'#')) {
+                return false;
+            }
+            ctx.pos = start + close + 1;
+            ctx.emit(start, ctx.pos, Kind::Property);
+            lx.mark_value();
+            true
+        }
+        b':' if ctx.peek_at(1) == b':' => {
+            ctx.token(2, Kind::Operator);
+            lx.mark_operator();
+            true
+        }
+        b':' if is_ident_start(ctx.peek_at(1)) && (start == 0 || !is_ident(ctx.src[start - 1])) => {
+            let end = lx.scan_ident(start + 1);
+            lx.ctx.pos = end;
+            lx.ctx.emit(start, end, Kind::Variable);
+            lx.mark_value();
+            true
+        }
+        _ => false,
+    }
+}
+
+static SQL_SPEC: Spec = Spec {
+    line_comments: &["--"],
+    block_comments: &[("/*", "*/")],
+    strings: &[
+        Str::quoted("'").doubled().multiline(),
+        Str::quoted("\"").raw().doubled().kind(Kind::Property),
+        Str::quoted("`").raw().doubled().kind(Kind::Property),
+    ],
+    string_prefixes: &[
+        Prefix::plain(b'E'),
+        Prefix::plain(b'e'),
+        Prefix::plain(b'N'),
+        Prefix::plain(b'n'),
+        Prefix::plain(b'X'),
+        Prefix::plain(b'x'),
+        Prefix::plain(b'B'),
+        Prefix::plain(b'b'),
+    ],
+    keywords: &[
+        "add", "after", "all", "alter", "analyze", "and", "any", "as", "asc", "begin", "between", "by", "call",
+        "cascade", "case", "check", "collate", "column", "commit", "conflict", "constraint", "create", "cross",
+        "current", "database", "declare", "default", "delete", "desc", "distinct", "do", "drop", "each", "else",
+        "elsif", "end", "escape", "except", "exception", "execute", "exists", "explain", "extension", "fetch",
+        "filter", "first", "following", "for", "foreign", "from", "full", "function", "grant", "group", "having", "if",
+        "ilike", "in", "index", "inner", "insert", "intersect", "into", "is", "join", "key", "language", "last",
+        "lateral", "left", "like", "limit", "loop", "materialized", "merge", "natural", "next", "not", "nothing",
+        "nulls", "of", "offset", "on", "only", "or", "order", "outer", "over", "partition", "preceding", "primary",
+        "procedure", "raise", "range", "recursive", "references", "rename", "replace", "return", "returning",
+        "returns", "revoke", "right", "rollback", "row", "rows", "schema", "select", "sequence", "set", "show",
+        "table", "temp", "temporary", "then", "to", "top", "transaction", "trigger", "truncate", "unbounded", "union",
+        "unique", "update", "use", "using", "vacuum", "values", "view", "when", "where", "while", "window", "with",
+        "within",
+    ],
+    types: &[
+        "array", "bigint", "bigserial", "binary", "bit", "blob", "bool", "boolean", "bytea", "char", "character",
+        "clob", "date", "datetime", "decimal", "double", "float", "int", "integer", "interval", "json", "jsonb",
+        "money", "nchar", "numeric", "nvarchar", "precision", "real", "serial", "smallint", "text", "time",
+        "timestamp", "timestamptz", "tinyint", "uuid", "varbinary", "varchar", "varying", "void", "xml",
+    ],
+    builtins: &[
+        "avg", "cast", "coalesce", "concat", "count", "current_date", "current_timestamp", "date_trunc", "extract",
+        "greatest", "least", "length", "lower", "max", "min", "now", "nullif", "rank", "round", "row_number",
+        "string_agg", "array_agg", "substring", "sum", "trim", "upper",
+    ],
+    constants: &["null", "true", "false", "unknown"],
+    // Table names follow these words.
+    type_keywords: &["table", "into", "from", "join", "update", "exists"],
+    sigils: &[(b'@', Kind::Variable)],
+    operators: "+-*/%=&|^!<>~?:",
+    case_insensitive: true,
+    features: CALLS | MEMBERS,
+    hook: Some(sql_hook),
+    hook_chars: "$[:",
+    ..Spec::DEFAULT
+};
+
+pub static SQL: Definition = Definition::new("sql", "SQL", Engine::Generic(&SQL_SPEC))
+    .aliases(&["mysql", "postgres", "postgresql", "pgsql", "plpgsql", "sqlite", "tsql", "plsql", "mssql", "mariadb"])
+    .extensions(&["sql", "ddl", "dml", "pgsql", "psql", "tsql"]);
+
+// GraphQL
+
+const GRAPHQL_KEYWORDS: &[&str] = &[
+    "query", "mutation", "subscription", "fragment", "on", "extend", "schema", "directive", "implements", "repeatable",
+];
+
+const GRAPHQL_TYPE_KEYWORDS: &[&str] = &["type", "interface", "union", "enum", "input", "scalar"];
+
+/// Lowercase names are fields (or arguments) unless they are keywords or
+/// calls. A name followed by `:` is always a field, even `type:`.
+fn graphql_hook(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    let end = lx.scan_ident(start);
+    let word = &lx.ctx.src[start..end];
+    let next = lx.ctx.next_non_space(end);
+    if next != b':' {
+        let reserved = |list: &[&str]| list.iter().any(|w| w.as_bytes() == word);
+        if next == b'('
+            || reserved(GRAPHQL_KEYWORDS)
+            || reserved(GRAPHQL_TYPE_KEYWORDS)
+            || reserved(&["true", "false", "null"])
+        {
+            return false;
+        }
+    }
+    lx.ctx.pos = end;
+    lx.ctx.emit(start, end, Kind::Property);
+    lx.mark_value();
+    true
+}
+
+static GRAPHQL_SPEC: Spec = Spec {
+    line_comments: &["#"],
+    strings: &[Str::quoted("\"\"\"").multiline(), Str::quoted("\"")],
+    keywords: GRAPHQL_KEYWORDS,
+    types: &["Int", "Float", "String", "Boolean", "ID"],
+    constants: &["true", "false", "null"],
+    type_keywords: GRAPHQL_TYPE_KEYWORDS,
+    sigils: &[(b'$', Kind::Variable)],
+    operators: "=!|&",
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | ANNOTATIONS,
+    hook: Some(graphql_hook),
+    hook_chars: "abcdefghijklmnopqrstuvwxyz_",
+    ..Spec::DEFAULT
+};
+
+pub static GRAPHQL: Definition = Definition::new("graphql", "GraphQL", Engine::Generic(&GRAPHQL_SPEC))
+    .aliases(&["gql"])
+    .extensions(&["graphql", "gql", "graphqls"]);
+
+// Diff
+
+pub static DIFF: Definition = Definition::new("diff", "Diff", Engine::Custom(diff))
+    .aliases(&["patch", "udiff"])
+    .extensions(&["diff", "patch", "rej"]);
+
+/// Extended header lines written by `git diff` and `diff -r`.
+const DIFF_META: &[&[u8]] = &[
+    b"index ", b"new file mode", b"deleted file mode", b"old mode", b"new mode", b"similarity index", b"rename from",
+    b"rename to", b"copy from", b"copy to", b"Binary files", b"Only in",
+];
+
+fn diff(ctx: &mut Ctx) {
+    while !ctx.done() {
+        let start = ctx.pos;
+        let end = ctx.line_end(start);
+        let line = &ctx.src[start..end];
+        let next = if end < ctx.len() { &ctx.src[end + 1..ctx.line_end(end + 1)] } else { &[][..] };
+        let kind = match line.first().copied().unwrap_or(0) {
+            // File headers come in pairs: `--- a/file` then `+++ b/file`.
+            b'-' if line.starts_with(b"--- ") && next.starts_with(b"+++ ") => {
+                ctx.emit(start, end, Kind::Heading);
+                ctx.emit(end + 1, end + 1 + next.len(), Kind::Heading);
+                ctx.pos = end + 1 + next.len();
+                if ctx.peek() == b'\n' {
+                    ctx.pos += 1;
+                }
+                continue;
+            }
+            b'*' if line.starts_with(b"*** ") && next.starts_with(b"--- ") => Kind::Heading,
+            b'+' | b'>' => Kind::Inserted,
+            b'-' | b'<' => Kind::Deleted,
+            b'!' => Kind::Constant,
+            b'@' if line.starts_with(b"@@") => {
+                // `@@ -1,3 +1,4 @@ fn context`: the trailing context stays text.
+                let close = ctx.find(start + 2, b"@@").filter(|&p| p < end).map_or(end, |p| p + 2);
+                ctx.emit(start, close, Kind::Meta);
+                ctx.pos = end;
+                if ctx.peek() == b'\n' {
+                    ctx.pos += 1;
+                }
+                continue;
+            }
+            b'\\' => Kind::Comment,
+            b'*' if line.iter().all(|&b| b == b'*' || b == b'\r') && line.len() > 3 => Kind::Meta,
+            b'=' if line.iter().all(|&b| b == b'=' || b == b'\r') => Kind::Meta,
+            _ if line.starts_with(b"diff ") || line.starts_with(b"Index: ") => Kind::Heading,
+            _ if DIFF_META.iter().any(|p| line.starts_with(p)) => Kind::Meta,
+            _ => Kind::Text,
+        };
+        ctx.emit(start, end, kind);
+        ctx.pos = end;
+        if ctx.peek() == b'\n' {
+            ctx.pos += 1;
+        }
+    }
+}
+
+// Protocol Buffers
+
+/// `name =` is a field, option or enum value name.
+fn assignment_key_hook(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    let end = lx.scan_ident(start);
+    let eq = lx.ctx.skip_spaces_from(end);
+    if lx.ctx.at(eq) != b'='
+        || matches!(lx.ctx.at(eq + 1), b'=' | b'>' | b'~')
+        || matches!(&lx.ctx.src[start..end], b"syntax" | b"edition")
+    {
+        return false;
+    }
+    lx.ctx.pos = end;
+    lx.ctx.emit(start, end, Kind::Property);
+    true
+}
+
+static PROTOBUF_SPEC: Spec = Spec {
+    line_comments: &["//"],
+    block_comments: &[("/*", "*/")],
+    strings: &[Str::quoted("\""), Str::quoted("'")],
+    keywords: &[
+        "syntax", "edition", "package", "import", "option", "returns", "stream", "oneof", "map", "repeated",
+        "optional", "required", "reserved", "extensions", "to", "max", "public", "weak", "group",
+    ],
+    types: &[
+        "double", "float", "int32", "int64", "uint32", "uint64", "sint32", "sint64", "fixed32", "fixed64", "sfixed32",
+        "sfixed64", "bool", "string", "bytes",
+    ],
+    constants: &["true", "false", "inf", "nan"],
+    function_keywords: &["rpc"],
+    type_keywords: &["message", "enum", "service", "extend"],
+    operators: "=-+<>",
+    features: CAPITALIZED_TYPES | UPPER_CONSTANTS,
+    hook: Some(assignment_key_hook),
+    hook_chars: "abcdefghijklmnopqrstuvwxyz_",
+    ..Spec::DEFAULT
+};
+
+pub static PROTOBUF: Definition = Definition::new("protobuf", "Protocol Buffers", Engine::Generic(&PROTOBUF_SPEC))
+    .aliases(&["proto", "proto3"])
+    .extensions(&["proto"]);
+
+// Thrift
+
+static THRIFT_SPEC: Spec = Spec {
+    line_comments: &["//", "#"],
+    block_comments: &[("/*", "*/")],
+    strings: &[Str::quoted("\""), Str::quoted("'")],
+    keywords: &[
+        "namespace", "include", "cpp_include", "const", "required", "optional", "oneway", "extends", "throws", "async",
+    ],
+    types: &[
+        "bool", "byte", "i8", "i16", "i32", "i64", "double", "string", "binary", "list", "set", "map", "void", "uuid",
+    ],
+    constants: &["true", "false"],
+    type_keywords: &["struct", "union", "exception", "enum", "service", "typedef", "senum"],
+    operators: "=-+<>*",
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS,
+    ..Spec::DEFAULT
+};
+
+pub static THRIFT: Definition =
+    Definition::new("thrift", "Thrift", Engine::Generic(&THRIFT_SPEC)).extensions(&["thrift"]);
+
+// HCL and Terraform
+
+/// Attribute and object keys (`name =`), nested block types at the start of
+/// a line (`lifecycle {`), and heredocs (`<<EOF`, `<<-EOF`).
+fn hcl_hook(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    if lx.ctx.peek() != b'<' {
+        if assignment_key_hook(lx) {
+            return true;
+        }
+        let end = lx.scan_ident(start);
+        if !lx.ctx.at_line_start(start) || !matches!(lx.ctx.next_non_space(end), b'{' | b'"') {
+            return false;
+        }
+        lx.ctx.pos = end;
+        lx.ctx.emit(start, end, Kind::Keyword);
+        return true;
+    }
+    let ctx = &mut *lx.ctx;
+    if !ctx.starts_with(b"<<") {
+        return false;
+    }
+    let mut i = start + 2;
+    let indented = ctx.at(i) == b'-';
+    i += indented as usize;
+    let word_start = i;
+    while is_ident(ctx.at(i)) {
+        i += 1;
+    }
+    if i == word_start || !matches!(ctx.at(ctx.skip_spaces_from(i)), b'\n' | b'\r') {
+        return false;
+    }
+    let delimiter = &ctx.src[word_start..i];
+    ctx.emit(start, i, Kind::Operator);
+    let body = ctx.line_end(i);
+    let mut pos = body + 1;
+    let mut body_end = ctx.len();
+    let mut term_end = ctx.len();
+    while pos < ctx.len() {
+        let end = ctx.line_end(pos);
+        let line = ctx.src[pos..end].trim_ascii();
+        if line == delimiter {
+            body_end = pos;
+            term_end = end;
+            break;
+        }
+        pos = end + 1;
+    }
+    ctx.emit(body, body_end, Kind::String);
+    ctx.emit(body_end, term_end, Kind::Operator);
+    ctx.pos = term_end;
+    lx.mark_value();
+    true
+}
+
+static HCL_SPEC: Spec = Spec {
+    line_comments: &["#", "//"],
+    block_comments: &[("/*", "*/")],
+    strings: &[Str::quoted("\"").interp(Interp::DollarBrace)],
+    keywords: &[
+        "resource", "data", "variable", "output", "locals", "module", "provider", "terraform", "backend",
+        "provisioner", "connection", "lifecycle", "dynamic", "content", "moved", "import", "check", "removed", "for",
+        "in", "if", "else", "endif", "endfor",
+    ],
+    types: &["string", "number", "bool", "list", "map", "set", "object", "tuple", "any"],
+    variables: &["var", "local", "each", "count", "self", "path"],
+    constants: &["true", "false", "null"],
+    ident_chars: "-",
+    operators: "+-*/%=&|!<>?:",
+    features: CALLS | MEMBERS,
+    hook: Some(hcl_hook),
+    hook_chars: "<abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
+    ..Spec::DEFAULT
+};
+
+pub static HCL: Definition = Definition::new("hcl", "HCL", Engine::Generic(&HCL_SPEC))
+    .aliases(&["terraform", "tf", "opentofu"])
+    .extensions(&["tf", "tfvars", "hcl", "nomad"])
+    .filenames(&[".terraformrc", "terraform.rc"]);
+
+// Prisma
+
+/// Field names: a lowercase word that starts a line and is followed by a type.
+fn prisma_hook(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    if !lx.ctx.at_line_start(start) {
+        return false;
+    }
+    let end = lx.scan_ident(start);
+    let next = lx.ctx.next_non_space(end);
+    if end == lx.ctx.skip_spaces_from(end) || !is_ident_start(next) {
+        return false;
+    }
+    if matches!(&lx.ctx.src[start..end], b"model" | b"enum" | b"type" | b"view" | b"datasource" | b"generator") {
+        return false;
+    }
+    lx.ctx.pos = end;
+    lx.ctx.emit(start, end, Kind::Property);
+    true
+}
+
+static PRISMA_SPEC: Spec = Spec {
+    line_comments: &["//"],
+    block_comments: &[("/*", "*/")],
+    strings: &[Str::quoted("\"")],
+    keywords: &["datasource", "generator"],
+    types: &["String", "Int", "BigInt", "Float", "Decimal", "Boolean", "DateTime", "Json", "Bytes", "Unsupported"],
+    builtins: &["autoincrement", "now", "uuid", "cuid", "env", "dbgenerated", "auto", "sequence"],
+    constants: &["true", "false", "null"],
+    type_keywords: &["model", "enum", "type", "view"],
+    sigils: &[(b'@', Kind::Meta)],
+    operators: "=?!",
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | LINE_KEYS | IDENT_KEYS,
+    hook: Some(prisma_hook),
+    hook_chars: "abcdefghijklmnopqrstuvwxyz_",
+    ..Spec::DEFAULT
+};
+
+pub static PRISMA: Definition =
+    Definition::new("prisma", "Prisma", Engine::Generic(&PRISMA_SPEC)).extensions(&["prisma"]);
+
+// HTTP
+
+pub static HTTP: Definition = Definition::new("http", "HTTP", Engine::Custom(http))
+    .aliases(&["https", "rest", "restclient"])
+    .extensions(&["http", "rest"]);
+
+const HTTP_METHODS: &[&[u8]] =
+    &[b"GET", b"POST", b"PUT", b"PATCH", b"DELETE", b"HEAD", b"OPTIONS", b"CONNECT", b"TRACE", b"QUERY"];
+
+/// HTTP messages, also in the `.http` file format with `###` separators,
+/// comments and `{{variables}}`.
+fn http(ctx: &mut Ctx) {
+    while !ctx.done() {
+        // Comments, separators, blank lines and `@name = value` definitions.
+        let line_start = ctx.pos;
+        let line_end = ctx.line_end(line_start);
+        let at = ctx.skip_spaces_from(line_start);
+        ctx.pos = at;
+        if ctx.peek() == b'#' || ctx.starts_with(b"//") {
+            line_comment(ctx);
+        } else if ctx.peek() == b'@' {
+            let mut e = at + 1;
+            while is_ident(ctx.at(e)) || ctx.at(e) == b'-' {
+                e += 1;
+            }
+            ctx.emit(at, e, Kind::Variable);
+            ctx.pos = ctx.skip_spaces_from(e);
+            if ctx.peek() == b'=' {
+                ctx.token(1, Kind::Operator);
+                ctx.skip_spaces();
+            }
+            http_text(ctx, line_end, Kind::String);
+        } else if at < line_end && !matches!(ctx.peek(), b'\r') {
+            http_message(ctx, line_end);
+            continue;
+        }
+        ctx.pos = line_end;
+        if ctx.peek() == b'\n' {
+            ctx.pos += 1;
+        }
+    }
+}
+
+fn http_message(ctx: &mut Ctx, line_end: usize) {
+    // Start line: `METHOD target HTTP/1.1` or `HTTP/1.1 200 OK`.
+    let at = ctx.pos;
+    let word_end = (at..line_end).find(|&i| matches!(ctx.src[i], b' ' | b'\t' | b'\r')).unwrap_or(line_end);
+    let word = &ctx.src[at..word_end];
+    if word.starts_with(b"HTTP/") {
+        ctx.emit(at, word_end, Kind::Type);
+        ctx.pos = ctx.skip_spaces_from(word_end);
+        let s = ctx.pos;
+        while ctx.peek().is_ascii_digit() {
+            ctx.pos += 1;
+        }
+        ctx.emit_from(s, Kind::Number);
+        ctx.pos = ctx.skip_spaces_from(ctx.pos);
+        let e = trim_end(ctx.src, ctx.pos, line_end);
+        ctx.emit(ctx.pos, e, Kind::String);
+    } else {
+        let method = HTTP_METHODS.contains(&word);
+        let target = if method {
+            ctx.emit(at, word_end, Kind::Keyword);
+            ctx.skip_spaces_from(word_end)
+        } else {
+            at
+        };
+        ctx.pos = target;
+        let mut target_end = trim_end(ctx.src, target, line_end);
+        if let Some(v) = ctx.find(target, b" HTTP/").filter(|&v| v < line_end) {
+            target_end = v;
+        }
+        http_text(ctx, target_end, Kind::String);
+        if target_end < line_end {
+            let s = ctx.skip_spaces_from(target_end);
+            ctx.emit(s, trim_end(ctx.src, s, line_end), Kind::Type);
+        }
+    }
+    ctx.pos = line_end;
+    // Headers until a blank line.
+    let mut content_type: &[u8] = b"";
+    while ctx.peek() == b'\n' {
+        let s = ctx.pos + 1;
+        let e = ctx.line_end(s);
+        if ctx.src[s..e].trim_ascii().is_empty() {
+            ctx.pos = e;
+            break;
+        }
+        if ctx.at(s) == b'#' || ctx.starts_with_at(s, b"//") {
+            ctx.pos = s;
+            line_comment(ctx);
+            continue;
+        }
+        // Query continuation lines in `.http` files: `    &page=2`.
+        let Some(colon) = ctx.src[s..e].iter().position(|&b| b == b':').map(|i| s + i) else {
+            ctx.pos = ctx.skip_spaces_from(s);
+            http_text(ctx, e, Kind::String);
+            ctx.pos = e;
+            continue;
+        };
+        let name = &ctx.src[s..colon];
+        ctx.emit(s, colon, Kind::Property);
+        ctx.emit(colon, colon + 1, Kind::Punctuation);
+        ctx.pos = ctx.skip_spaces_from(colon + 1);
+        if name.eq_ignore_ascii_case(b"content-type") {
+            content_type = &ctx.src[ctx.pos..e];
+        }
+        http_text(ctx, e, Kind::String);
+        ctx.pos = e;
+    }
+    // Body until the next `###` separator.
+    if ctx.peek() != b'\n' {
+        return;
+    }
+    let body = ctx.pos + 1;
+    let mut end = body;
+    while end < ctx.len() && !ctx.starts_with_at(end, b"###") {
+        end = ctx.line_end(end);
+        if end < ctx.len() {
+            end += 1;
+        }
+    }
+    let first = ctx.src[body..end].iter().find(|b| !b.is_ascii_whitespace()).copied().unwrap_or(0);
+    let has = |s: &[u8]| content_type.windows(s.len()).any(|w| w.eq_ignore_ascii_case(s));
+    let language = if has(b"json") || (content_type.is_empty() && matches!(first, b'{' | b'[')) {
+        Some("json")
+    } else if has(b"html") {
+        Some("html")
+    } else if has(b"xml") || (content_type.is_empty() && first == b'<') {
+        Some("xml")
+    } else if has(b"graphql") {
+        Some("graphql")
+    } else if has(b"javascript") {
+        Some("javascript")
+    } else if has(b"css") {
+        Some("css")
+    } else if has(b"yaml") {
+        Some("yaml")
+    } else {
+        None
+    };
+    match language {
+        Some(id) => ctx.embed(lang(id), body, end),
+        None => ctx.pos = end,
+    }
+    ctx.pos = end;
+}
+
+/// Text up to `end` with `{{variable}}` references.
+fn http_text(ctx: &mut Ctx, end: usize, kind: Kind) {
+    let mut seg = ctx.pos;
+    while ctx.pos < end {
+        if ctx.starts_with(b"{{") {
+            if let Some(close) = ctx.find(ctx.pos + 2, b"}}").filter(|&c| c < end) {
+                ctx.emit_from(seg, kind);
+                ctx.emit(ctx.pos, close + 2, Kind::Variable);
+                ctx.pos = close + 2;
+                seg = ctx.pos;
+                continue;
+            }
+        }
+        ctx.pos += 1;
+    }
+    let e = trim_end(ctx.src, seg, end);
+    ctx.emit(seg, e, kind);
+    ctx.pos = end;
 }
