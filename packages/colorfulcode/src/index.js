@@ -50,6 +50,19 @@ function meta() {
   return metadata;
 }
 
+/** Detection only reads the first few KB, so there is no point copying more. */
+const DETECT_CHARS = 4096;
+
+/** Guesses a language index from the code alone, or -1. */
+function guessLanguage(code) {
+  return instance().cc_language_detect(writeInput(code.slice(0, DETECT_CHARS)));
+}
+
+/** The index of a language name, or of the guess for `code` when the name is "auto". */
+function languageFor(name, code) {
+  return name === "auto" ? guessLanguage(code) : resolveLanguage(name);
+}
+
 function resolveLanguage(name) {
   if (typeof name !== "string" || name === "") return -1;
   let index = languageCache.get(name);
@@ -91,12 +104,14 @@ const LINE_NUMBERS = 4;
  * With a theme (the default is "colorful") the HTML uses inline styles and
  * needs no CSS. Pass `theme: false` to get class names instead and style them
  * with `themeCss()` or `colorfulcode/themes/<name>.css`.
+ *
+ * Pass `"auto"` as the language to guess it from the code first.
  */
 export function highlight(code, language, options = {}) {
   const w = instance();
   const { theme, pre = true, lines = false, lineNumbers = false, highlightLines } = options;
   const themeIndex = resolveTheme(theme);
-  const languageIndex = resolveLanguage(language);
+  const languageIndex = languageFor(language, code);
   let lineCount = 0;
   if (highlightLines && highlightLines.length) {
     lineCount = highlightLines.length;
@@ -110,13 +125,13 @@ export function highlight(code, language, options = {}) {
 /**
  * Tokenizes code. Every token has `start` and `end` offsets into the string
  * (UTF-16, like `String.prototype.slice`), its `kind` and its `text`. The
- * tokens cover the whole input.
+ * tokens cover the whole input. The language can be `"auto"`, as in `highlight()`.
  */
 export function tokenize(code, language) {
   const w = instance();
   // Resolve names first: lookups reuse the input and output buffers.
   const kinds = meta().kinds;
-  const languageIndex = resolveLanguage(language);
+  const languageIndex = languageFor(language, code);
   const count = w.cc_tokenize(writeInput(code), languageIndex);
   const raw = new Uint32Array(w.memory.buffer, w.cc_output_ptr(), count * 3);
   const tokens = new Array(count);
@@ -201,12 +216,18 @@ export function getTheme(name) {
   return index === undefined ? undefined : meta().themes[index];
 }
 
-/** Guesses a language id from a file path and/or the code (shebangs). */
-export function detectLanguage({ path, code } = {}) {
+/**
+ * Guesses a language id from a file path, then from a shebang or doctype in
+ * the code. With `guess: true` the code itself is scored against every
+ * language too. Returns undefined when unsure.
+ */
+export function detectLanguage({ path, code, guess = false } = {}) {
   const w = instance();
   let index = -1;
   if (path) index = w.cc_language_from_path(writeInput(path));
-  if (index < 0 && code) index = w.cc_language_from_content(writeInput(code.slice(0, 256)));
+  if (index < 0 && code) {
+    index = guess ? guessLanguage(code) : w.cc_language_from_content(writeInput(code.slice(0, 256)));
+  }
   return index < 0 ? undefined : meta().languages[index].id;
 }
 

@@ -174,6 +174,13 @@ pub extern "C" fn cc_language_from_content(len: usize) -> i32 {
     with(|s| index_of(Language::from_content(&input_str(&s.input[..len]))))
 }
 
+/// Guesses the language of the code in the input from its content alone, see
+/// `Language::detect`. Returns its index or -1 when unsure.
+#[no_mangle]
+pub extern "C" fn cc_language_detect(len: usize) -> i32 {
+    with(|s| index_of(Language::detect(&input_str(&s.input[..len]))))
+}
+
 /// Highlights the input as HTML. `theme` is a theme index for inline styles
 /// or -1 for class names. The first `line_count` numbers of the line buffer
 /// are highlighted lines. Returns the output length.
@@ -334,6 +341,15 @@ mod tests {
         let out = cc_highlight(len, lang, -1, 0, 0);
         let html = String::from_utf8(output(out)).unwrap();
         assert!(html.contains("<span class=\"cc-keyword\">fn</span>"));
+    }
+
+    #[test]
+    fn detection() {
+        let len = write_input("def greet(name):\n    print(f\"hi {name}\")\n");
+        let index = cc_language_detect(len);
+        assert_eq!(Language::all()[index as usize].id(), "python");
+        let len = write_input("just some words");
+        assert_eq!(cc_language_detect(len), -1);
     }
 
     #[test]

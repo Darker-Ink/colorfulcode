@@ -73,22 +73,36 @@ export interface HighlightOptions {
   highlightLines?: number[];
 }
 
+/**
+ * A language id, alias, name or extension, or `"auto"` to guess the language
+ * from the code (plain text when unsure). Unknown names mean plain text.
+ */
+export type LanguageName = "auto" | (string & {});
+
 /** Highlights code and returns HTML. Unknown languages render as plain text. */
-export function highlight(code: string, language: string, options?: HighlightOptions): string;
+export function highlight(code: string, language: LanguageName, options?: HighlightOptions): string;
 /** Tokens covering the whole input. */
-export function tokenize(code: string, language: string): Token[];
+export function tokenize(code: string, language: LanguageName): Token[];
 /** Tokens split into lines, without line breaks. */
-export function tokenizeLines(code: string, language: string): LineToken[][];
+export function tokenizeLines(code: string, language: LanguageName): LineToken[][];
 export function listLanguages(): LanguageInfo[];
 export function listThemes(): ThemeInfo[];
 export function getLanguage(name: string): LanguageInfo | undefined;
 export function getTheme(name: string | ThemeDefinition): ThemeInfo | undefined;
 /** Registers a custom theme and returns its name. */
 export function defineTheme(theme: ThemeDefinition): string;
-/** Guesses a language id from a file path and/or the code. */
-export function detectLanguage(input: { path?: string; code?: string }): string | undefined;
+/**
+ * Guesses a language id from a file path, then from a shebang or doctype in
+ * the code. Undefined when unsure.
+ */
+export function detectLanguage(input: {
+  path?: string;
+  code?: string;
+  /** Also guess from the code itself, scoring it against every language. */
+  guess?: boolean;
+}): string | undefined;
 /** CSS for the class based output, scoped to `selector` (default ".cc"). */
 export function themeCss(theme?: ThemeName | (string & {}) | ThemeDefinition, selector?: string): string;
 /** Highlights every `code.language-xyz` element inside `root`. */
 export function highlightAll(options?: HighlightOptions, root?: ParentNode): void;
-export function highlightElement(element: Element, options?: HighlightOptions & { language?: string }): void;
+export function highlightElement(element: Element, options?: HighlightOptions & { language?: LanguageName }): void;
