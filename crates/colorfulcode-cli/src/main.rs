@@ -89,7 +89,7 @@ fn print_files(args: &Args, painter: &Painter, out: &mut impl Write) -> io::Resu
         let language = args
             .language
             .or_else(|| Language::from_path(&path.to_string_lossy()))
-            .or_else(|| Language::from_content(&code))
+            .or_else(|| guess(&code, args.html || painter.mode.is_some()))
             .unwrap_or_else(Language::plain);
         if args.html {
             let options =
@@ -109,6 +109,16 @@ fn print_files(args: &Args, painter: &Painter, out: &mut impl Write) -> io::Resu
         print_code(&code, language, painter, args.line_numbers, out)?;
     }
     Ok(ok)
+}
+
+/// The language of a file without a known name: a shebang or doctype, or
+/// else a guess from the content when the output shows the colors at all.
+fn guess(code: &str, colored: bool) -> Option<Language> {
+    if colored {
+        Language::detect(code)
+    } else {
+        Language::from_content(code)
+    }
 }
 
 /// Reads a file, or stdin for `-`. Invalid UTF-8 is replaced.
