@@ -10,6 +10,8 @@
 This is *strong*, _emphasized_ and `raw` text with an escaped \#hash.
 See @intro and https://typst.app for details. Inline math: $x^2 + y^2 = r^2$.
 
+$ sum_(i=1)^n i = (n(n+1)) / 2 "for all" n >= 1, quad alpha arrow.r beta $
+
 == Lists
 - First item
 - Second item with #title

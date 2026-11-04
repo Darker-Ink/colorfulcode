@@ -150,11 +150,34 @@ fn typst_markup_and_code() {
             ("width", Property),
             ("2cm", Number),
             ("Box", Text),
-            ("$a^2$", String),
+            ("$a", String),
+            ("^", Operator),
+            ("2", Number),
+            ("$", String),
             ("@ref", Constant),
         ],
     );
     assert_not("typst", "a snake_case_name here", "_case_", Emphasis);
+    let code = r#"$ sqrt(x) + alpha.alt dot 2.5 \$ "text $" #f(1) $ after"#;
+    assert_tokens(
+        "typst",
+        code,
+        &[
+            ("sqrt", Function),
+            ("+", Operator),
+            ("alpha.alt", Constant),
+            ("2.5", Number),
+            ("\\$", Escape),
+            ("\"text $\"", String),
+            ("#f", Function),
+            ("$", String),
+            ("after", Text),
+        ],
+    );
+    // Code mode math.
+    assert_tokens("typst", "#let e = $m c^2$", &[("#let", Keyword), ("$m", String), ("^", Operator)]);
+    // Calls need the `(` right after the name.
+    assert_not("typst", "#{ let y = x (1) }", "x", Function);
 }
 
 #[test]
@@ -301,6 +324,39 @@ fn razor_code() {
         ],
     );
     assert_not("razor", code, "@b", Punctuation);
+    // Code blocks hold C# statements, nested blocks and markup; braces in text stay text.
+    let code = "@{\n  var n = 1;\n  if (n > 0) {\n    <b>{x}</b>\n  }\n  @:Hi @n\n}\n<p>}</p>";
+    assert_tokens(
+        "razor",
+        code,
+        &[
+            ("@{", Punctuation),
+            ("var", Type),
+            ("=", Operator),
+            ("1", Number),
+            ("if", Keyword),
+            ("{", Punctuation),
+            ("b", Tag),
+            ("{x}", Text),
+            ("}", Punctuation),
+            ("@:", Punctuation),
+            ("Hi", Text),
+            ("n", Text),
+            ("}", Punctuation),
+            ("p", Tag),
+            ("}", Text),
+        ],
+    );
+    let code = "@switch (k) {\n  case 1: <p>one</p> break;\n  default: break;\n}";
+    assert_tokens(
+        "razor",
+        code,
+        &[("case", Keyword), ("p", Tag), ("one", Text), ("break", Keyword), ("default", Keyword), ("}", Punctuation)],
+    );
+    // Strings in code may hold braces and markup.
+    let code = "@{ var s = \"}<p>\"; var v = @\"C:\\\"; }";
+    assert_tokens("razor", code, &[("\"}<p>\"", String), ("}", Punctuation)]);
+    assert_not("razor", code, "p", Tag);
 }
 
 #[test]
@@ -358,6 +414,10 @@ fn pug_haml_and_slim() {
             ("f", Function),
         ],
     );
+    // Quoted attribute values are Ruby strings with interpolation.
+    for (id, code) in [("slim", "a href=\"/p/#{id}\" Go"), ("haml", "%a(href=\"/p/#{id}\") Go")] {
+        assert_tokens(id, code, &[("\"/p/", String), ("#{", Punctuation), ("id", Text), ("}", Punctuation)]);
+    }
 }
 
 #[test]
@@ -404,4 +464,112 @@ fn roff_texinfo_and_pod() {
             ("=cut", Keyword),
         ],
     );
+}
+
+#[test]
+fn liquid_tag_and_comment_tag() {
+    let code = "{% # note %}{% liquid\n  # pick\n  assign n = list | size\n  echo n\n%}";
+    assert_tokens(
+        "liquid",
+        code,
+        &[
+            ("{% # note %}", Comment),
+            ("liquid", Keyword),
+            ("# pick", Comment),
+            ("assign", Keyword),
+            ("size", Function),
+            ("echo", Keyword),
+        ],
+    );
+    // Named parameters read as keys.
+    let code = "{% for p in list limit: 2 offset: 1 %}";
+    assert_tokens("liquid", code, &[("limit", Property), ("offset", Property)]);
+}
+
+#[test]
+fn mustache_delimiter_changes() {
+    let code = "{{a}} {{=<% %>=}} <% b %> {{c}} <%! note %><%={{ }}=%>{{#d}}";
+    assert_tokens(
+        "mustache",
+        code,
+        &[
+            ("{{=", Punctuation),
+            ("<%", String),
+            ("%>", String),
+            ("=}}", Punctuation),
+            ("b", Text),
+            ("{{c}}", Text),
+            ("<%! note %>", Comment),
+            ("#d", Keyword),
+        ],
+    );
+    // An unclosed change leaves the rest as text.
+    assert_not("mustache", "{{=<% %> <% x %>", "<%", Punctuation);
+}
+
+#[test]
+fn pug_inline_tags() {
+    let code = "p Text #[em.big(title=t) word #{x}] and #[b= y] \\#[no]";
+    assert_tokens(
+        "pug",
+        code,
+        &[
+            ("#[", Punctuation),
+            ("em", Tag),
+            (".big", Attribute),
+            ("title", Attribute),
+            ("word", Text),
+            ("#{", Punctuation),
+            ("x", Text),
+            ("}]", Punctuation),
+            ("b", Tag),
+            ("=", Punctuation),
+            ("y", Text),
+        ],
+    );
+    assert_not("pug", "p a \\#[no] b", "no", Tag);
+}
+
+#[test]
+fn inline_markup_wraps_within_a_paragraph() {
+    let code = "Some *wrapped\nemphasis* and ``a\nliteral`` here *x\n\nnot* closed.";
+    assert_tokens("rst", code, &[("*wrapped\nemphasis*", Emphasis), ("``a\nliteral``", String)]);
+    assert_not("rst", code, "*x\n\nnot*", Emphasis);
+    let code = "Some *wrapped\nstrong* then _more_.\n\n- item *one\n- item two*";
+    assert_tokens("asciidoc", code, &[("*wrapped\nstrong*", Strong), ("_more_", Emphasis)]);
+    assert_not("asciidoc", code, "*one\n- item two*", Strong);
+    // Org emphasis spans at most two lines.
+    let code = "Some /wrapped\ntext/ and =a\nb\nc= end.";
+    assert_tokens("org", code, &[("/wrapped\ntext/", Emphasis)]);
+    assert_not("org", code, "=a\nb\nc=", String);
+}
+
+#[test]
+fn unclosed_template_constructs_stay_linear() {
+    let cases = [
+        ("razor", "@{ <div><a>{ if (x) { @: y\n".repeat(5_000)),
+        ("razor", "@{ <p> ".repeat(20_000)),
+        ("razor", "@if (a) { <b> } else ".repeat(10_000)),
+        ("mustache", "{{=<% %>=}} <% a ".repeat(10_000)),
+        ("liquid", "{% liquid\nassign a = 1\n".repeat(10_000)),
+        ("pug", "p #[a #[b(c=\"[\") #{d ".repeat(10_000)),
+        ("typst", "$ a(b #f( \" ".repeat(10_000)),
+        ("haml", "%p{a: \"#{b\" ".repeat(10_000)),
+        ("slim", "p a=\"#{b\" ".repeat(10_000)),
+    ];
+    for (id, code) in cases {
+        let start = std::time::Instant::now();
+        let _ = colorfulcode::highlight(&code, Language::find(id).unwrap());
+        assert!(start.elapsed().as_secs() < 2, "{id} is too slow on {:?}", &code[..20]);
+    }
+}
+
+#[test]
+fn unclosed_inline_markup_on_long_lines_stays_linear() {
+    let line = "*a `b ``c |d [e <<f ".repeat(20_000);
+    for id in ["rst", "asciidoc", "org"] {
+        let start = std::time::Instant::now();
+        let _ = colorfulcode::highlight(&line, Language::find(id).unwrap());
+        assert!(start.elapsed().as_secs() < 2, "{id} is too slow on a long line");
+    }
 }

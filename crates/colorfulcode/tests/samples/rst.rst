@@ -14,6 +14,10 @@ Installation
 Install the package with ``pip install colorful`` and read the *quick* guide.
 This is **important**: see :ref:`config` and the `docs <https://example.com/docs>`_.
 Use :py:func:`colorful.highlight` or call |project|_ with \*escaped\* stars [#note]_.
+Markup can *wrap onto
+the next line*, as can ``inline
+literals`` and `links that run
+long <https://example.com/long>`_.
 
 .. note:: Python 3.8 or later is required.
 

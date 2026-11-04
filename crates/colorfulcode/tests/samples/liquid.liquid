@@ -2,6 +2,14 @@
   Product grid for the collection page.
 {% endcomment %}
 {% assign products_per_row = 4 %}
+{% # an inline comment tag %}
+{%- liquid
+  # pick the grid size
+  assign columns = products_per_row | at_most: 6
+  if collection.products.size > 12
+    echo 'many' | upcase
+  endif
+-%}
 {%- capture title -%}{{ collection.title | upcase }}{%- endcapture -%}
 
 <section class="collection" data-count="{{ collection.products.size }}">

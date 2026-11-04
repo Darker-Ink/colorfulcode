@@ -7,6 +7,9 @@ Ada Lovelace <ada@example.com>
 // A line comment
 This guide covers *installation*, _usage_ and `configuration` of version {version}.
 See <<usage,the usage section>> or https://example.com/docs[the docs].
+Markup may *wrap onto
+the next line* and `literals
+can too`, then text goes on.
 
 == Installation
 

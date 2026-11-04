@@ -1,10 +1,10 @@
 //! Documentation, typesetting and template languages.
 
 use super::markup::PHP_SPEC;
-use super::{lang, Definition, Engine};
+use super::{c_family, markup, scripting, web, Definition, Engine, Language};
 use crate::lexer::generic::{features::*, Interp, Lexer, Spec, Str};
 use crate::lexer::{is_ident, is_ident_start, Ctx};
-use crate::{Kind, Language};
+use crate::Kind;
 
 pub static LANGUAGES: &[&Definition] = &[
     &LATEX, &BIBTEX, &RST, &ASCIIDOC, &ORG, &TYPST, &GHERKIN, &HANDLEBARS, &JINJA, &TWIG, &LIQUID, &ERB, &EJS, &PUG,
@@ -93,6 +93,15 @@ pub static POD: Definition =
 
 // Shared helpers
 
+// Embedded languages, referenced directly so no lookup by name runs per embed.
+const HTML: Language = Language(&markup::HTML);
+const CSS: Language = Language(&web::CSS);
+const JS: Language = Language(&web::JAVASCRIPT);
+const RUBY: Language = Language(&scripting::RUBY);
+const PYTHON: Language = Language(&scripting::PYTHON);
+const PERL: Language = Language(&scripting::PERL);
+const CSHARP: Language = Language(&c_family::CSHARP);
+
 /// End of a name made of identifier bytes and any of `extra`.
 fn name_end(ctx: &Ctx, from: usize, extra: &[u8]) -> usize {
     let mut i = from;
@@ -108,6 +117,9 @@ fn name_end(ctx: &Ctx, from: usize, extra: &[u8]) -> usize {
 /// How far a closing bracket is searched for when a missing one would make
 /// the lexer rescan the same text again and again.
 const SCAN_LIMIT: usize = 1024;
+
+/// How many following lines wrapped inline markup may continue on.
+const WRAP_LINES: usize = 3;
 
 /// `p + SCAN_LIMIT`, capped at `len`.
 fn near(p: usize, len: usize) -> usize {
@@ -183,20 +195,6 @@ fn indented_block(ctx: &Ctx, line_end: usize, base: usize) -> usize {
     end
 }
 
-/// Offset of `needle` at or after `from` when it ends before `end`.
-fn find_in(ctx: &Ctx, from: usize, end: usize, needle: &[u8]) -> Option<usize> {
-    let end = end.min(ctx.len());
-    let mut i = from;
-    while i + needle.len() <= end {
-        let at = i + ctx.src[i..end].iter().position(|&b| b == needle[0])?;
-        if ctx.src[at..end].starts_with(needle) {
-            return Some(at);
-        }
-        i = at + 1;
-    }
-    None
-}
-
 /// Runs `body` over every line, keeping the cursor moving forward.
 fn each_line(ctx: &mut Ctx, mut body: impl FnMut(&mut Ctx, usize, usize)) {
     while !ctx.done() {
@@ -244,6 +242,67 @@ fn url_end(src: &[u8], at: usize, end: usize) -> Option<usize> {
         e -= 1;
     }
     Some(at + e)
+}
+
+/// End of the text that inline markup opened on the line ending at `from` may
+/// wrap onto: the start of the next blank line or list item, at most `lines`
+/// lines on and never past `reach`.
+fn wrap_end(src: &[u8], from: usize, reach: usize, lines: usize) -> usize {
+    let line_end = |at: usize| src[at..reach].iter().position(|&b| b == b'\n').map_or(reach, |k| at + k);
+    let mut i = line_end(from.min(reach));
+    for _ in 0..lines {
+        if i >= reach {
+            return reach;
+        }
+        let next = i + 1;
+        let e = line_end(next);
+        let line = src[next..e].trim_ascii();
+        // List markers: `- `, `* `, `** `, `. `, `#. `, `1. ` and `1) `.
+        let marker = match line.iter().take_while(|b| b.is_ascii_digit()).count() {
+            0 => line.iter().take_while(|b| b"-*+.#".contains(b)).count(),
+            d if matches!(line.get(d), Some(b'.' | b')')) => d + 1,
+            _ => 0,
+        };
+        if line.is_empty() || (marker > 0 && matches!(line.get(marker), Some(b' ' | b'\t'))) {
+            return next;
+        }
+        i = e;
+    }
+    i
+}
+
+/// Closing `needle` of inline markup whose text starts at `from`: the first
+/// match within reach for which `ok` holds, on the line (before `end`) or on
+/// up to `lines` following lines of the paragraph.
+fn closer(
+    ctx: &Ctx,
+    from: usize,
+    end: usize,
+    lines: usize,
+    needle: &[u8],
+    ok: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let reach = near(from, ctx.len());
+    let search = |mut i: usize, limit: usize| {
+        while let Some(c) = ctx.find_in(i, limit, needle) {
+            if ok(c) {
+                return Some(c);
+            }
+            i = c + 1;
+        }
+        None
+    };
+    search(from, end.min(reach)).or_else(|| {
+        if lines == 0 || end >= reach {
+            return None;
+        }
+        search(end.max(from), wrap_end(ctx.src, end, reach, lines))
+    })
+}
+
+/// The end of the line holding `at`, without a carriage return.
+fn content_line_end(ctx: &Ctx, at: usize) -> usize {
+    start_of_cr(ctx, ctx.line_end(at))
 }
 
 // LaTeX
@@ -390,7 +449,7 @@ fn tex_paragraph_end(src: &[u8], from: usize, end: usize) -> usize {
 /// Offset of `\end{env}` at or after `from`.
 fn tex_find_end(ctx: &Ctx, from: usize, end: usize, env: &[u8]) -> Option<usize> {
     let mut i = from;
-    while let Some(p) = find_in(ctx, i, end, b"\\end{") {
+    while let Some(p) = ctx.find_in(i, end, b"\\end{") {
         let name = p + 5;
         if ctx.src[name..end].starts_with(env) && ctx.at(name + env.len()) == b'}' {
             return Some(p);
@@ -407,7 +466,7 @@ fn tex_command(ctx: &mut Ctx, end: usize, math: bool) {
         // `\(...\)` and `\[...\]` math, or a control symbol such as `\%`.
         if !math && (first == b'(' || first == b'[') {
             let closer: &[u8] = if first == b'(' { b"\\)" } else { b"\\]" };
-            if let Some(c) = find_in(ctx, start + 2, tex_paragraph_end(ctx.src, start, end), closer) {
+            if let Some(c) = ctx.find_in(start + 2, tex_paragraph_end(ctx.src, start, end), closer) {
                 ctx.emit(start, start + 2, Kind::String);
                 ctx.pos = start + 2;
                 tex(ctx, c, true);
@@ -661,12 +720,12 @@ fn html_text(ctx: &mut Ctx, start: usize, end: usize, state: &mut Html) {
     while pos < end {
         match *state {
             Html::Text => {
-                ctx.embed(lang("html"), pos, end);
+                ctx.embed(HTML, pos, end);
                 *state = html_scan(src, pos, end);
                 pos = end;
             }
             Html::Comment => {
-                let close = find_in(ctx, pos, end, b"-->");
+                let close = ctx.find_in(pos, end, b"-->");
                 let stop = close.map_or(end, |p| p + 3);
                 ctx.emit(pos, stop, Kind::Comment);
                 if close.is_some() {
@@ -722,7 +781,7 @@ fn html_text(ctx: &mut Ctx, start: usize, end: usize, state: &mut Html) {
             Html::Raw(raw) => {
                 let close = find_ignore_case(src, pos, end, raw_close(raw));
                 let stop = close.unwrap_or(end);
-                ctx.embed(if raw == STYLE { lang("css") } else { lang("javascript") }, pos, stop);
+                ctx.embed(if raw == STYLE { CSS } else { JS }, pos, stop);
                 if close.is_some() {
                     *state = Html::Text;
                 }
@@ -798,13 +857,15 @@ enum Body {
     Comment,
     /// An escaped delimiter such as `<%%`, left as text.
     Literal,
+    /// Mustache's `{{=<% %>=}}`, which changes the delimiters from here on.
+    SetDelims,
     Expr(&'static Spec),
     /// Like `Expr`, but a leading word followed by arguments is a helper call.
     Helper(&'static Spec),
     /// The first word names the tag, as in `{% if x %}`.
     Stmt(&'static Spec),
-    /// Code in another language, by id.
-    Code(&'static str),
+    /// Code in another language.
+    Code(Language),
 }
 
 struct Delim {
@@ -837,8 +898,8 @@ struct Tpl<'c, 's, 'o> {
     html: Html,
     /// Start of the host text not lexed yet.
     text: usize,
-    /// Open code blocks whose `}` is still to come (Razor).
-    depth: u32,
+    /// End of the range being lexed (a markup element inside a Razor code block).
+    end: usize,
 }
 
 impl Tpl<'_, '_, '_> {
@@ -859,7 +920,7 @@ impl Tpl<'_, '_, '_> {
             inner += 1;
         }
         let close = match d.body {
-            Body::Comment => find_in(self.ctx, inner, len, d.close),
+            Body::Comment => self.ctx.find_in(inner, len, d.close),
             _ => tag_close(src, inner, d.close),
         }
         .unwrap_or(len);
@@ -869,7 +930,13 @@ impl Tpl<'_, '_, '_> {
         }
         let end = (close + d.close.len()).min(len);
         let ctx = &mut *self.ctx;
-        let comment = matches!(d.body, Body::Comment) || (matches!(d.body, Body::Helper(_)) && ctx.at(inner) == b'!');
+        // `{{! note }}` and Liquid's `{% # note %}` are comments too.
+        let comment = match d.body {
+            Body::Comment => true,
+            Body::Helper(_) => ctx.at(inner) == b'!',
+            Body::Stmt(_) => ctx.at(skip_whitespace_from(ctx, inner)) == b'#',
+            _ => false,
+        };
         if comment {
             ctx.emit(at, end, Kind::Comment);
             ctx.pos = end;
@@ -885,11 +952,15 @@ impl Tpl<'_, '_, '_> {
                 let e = name_end(ctx, w, b"").min(inner_end);
                 word = &src[w..e];
                 ctx.emit(w, e, Kind::Keyword);
-                // Re-lexing the tag name lets the spec see it, as in `block name`.
-                ctx.embed_spec(spec, w, inner_end);
+                if word == b"liquid" {
+                    liquid_lines(ctx, spec, e, inner_end);
+                } else {
+                    // Re-lexing the tag name lets the spec see it, as in `block name`.
+                    ctx.embed_spec(spec, w, inner_end);
+                }
             }
-            Body::Code(id) => ctx.embed(lang(id), inner, inner_end),
-            Body::Comment | Body::Literal => {}
+            Body::Code(language) => ctx.embed(language, inner, inner_end),
+            Body::Comment | Body::Literal | Body::SetDelims => {}
         }
         ctx.emit(inner_end, end, t.mark);
         ctx.pos = end;
@@ -900,7 +971,8 @@ impl Tpl<'_, '_, '_> {
             b"comment" => b"endcomment",
             _ => return end,
         };
-        let open = find_in(ctx, end, len, end_word)
+        let open = ctx
+            .find_in(end, len, end_word)
             .and_then(|p| src[end..p].windows(d.open.len()).rposition(|w| w == d.open))
             .map_or(len, |i| end + i);
         if word == b"comment" {
@@ -913,13 +985,30 @@ impl Tpl<'_, '_, '_> {
     }
 }
 
+/// The body of Liquid's `{% liquid %}` tag: one tag per line, without
+/// delimiters, and `#` comment lines.
+fn liquid_lines(ctx: &mut Ctx, spec: &'static Spec, from: usize, end: usize) {
+    let mut p = from;
+    while p < end {
+        let line_end = ctx.find_in(p, end, b"\n").unwrap_or(end);
+        let w = skip_whitespace_from(ctx, p).min(line_end);
+        if ctx.at(w) == b'#' {
+            ctx.emit(w, line_end, Kind::Comment);
+        } else if w < line_end {
+            ctx.emit(w, name_end(ctx, w, b"").min(line_end), Kind::Keyword);
+            ctx.embed_spec(spec, w, line_end);
+        }
+        p = line_end + 1;
+    }
+}
+
 /// Offset of the closing delimiter `close` at or after `from`, skipping quoted
 /// strings so that `{{ "}}" }}` stays one tag.
 fn tag_close(src: &[u8], from: usize, close: &[u8]) -> Option<usize> {
     let mut i = from;
     while i < src.len() {
         let b = src[i];
-        if src[i..].starts_with(close) {
+        if close.first() == Some(&b) && src[i..].starts_with(close) {
             return Some(i);
         }
         if matches!(b, b'"' | b'\'' | b'`') {
@@ -941,31 +1030,43 @@ fn tag_close(src: &[u8], from: usize, close: &[u8]) -> Option<usize> {
 fn template(ctx: &mut Ctx, t: &'static Template) {
     let start = ctx.pos;
     let len = ctx.len();
-    let mut tp = Tpl { ctx, html: Html::Text, text: start, depth: 0 };
+    let mut tp = Tpl { ctx, html: Html::Text, text: start, end: len };
+    run_template(&mut tp, t, start, len);
+}
+
+/// Lexes `[start, end)`: host text with template tags.
+fn run_template(tp: &mut Tpl, t: &'static Template, start: usize, len: usize) {
     let mut i = start;
     while i < len {
         let src = tp.ctx.src;
-        match src[i..].iter().position(|b| t.starts.contains(b)) {
+        match src[i..len].iter().position(|b| t.starts.contains(b)) {
             Some(off) => i += off,
             None => break,
         }
         if let Some(d) = t.delims.iter().find(|d| src[i..].starts_with(d.open)) {
-            if let Body::Literal = d.body {
-                i += d.open.len();
-                continue;
+            match d.body {
+                Body::Literal => {
+                    i += d.open.len();
+                    continue;
+                }
+                Body::SetDelims => {
+                    i = mustache(tp, i, &d.open[..d.open.len() - 1], d.close);
+                    continue;
+                }
+                _ => {}
             }
             tp.flush(i);
             i = tp.tag(i, d, t).max(i + 1);
             tp.text = i;
             continue;
         }
-        match t.hook.and_then(|hook| hook(&mut tp, i)) {
+        match t.hook.and_then(|hook| hook(tp, i)) {
             Some(next) => i = next.max(i + 1),
             None => i += 1,
         }
     }
     tp.flush(len);
-    tp.ctx.pos = len;
+    tp.ctx.pos = tp.ctx.pos.max(len);
 }
 
 /// Handlebars and Go template tags: block markers and helper calls.
@@ -984,10 +1085,8 @@ fn helper(ctx: &mut Ctx, spec: &'static Spec, inner: usize, end: usize) {
         let e = name_end(ctx, p, b"-").min(end);
         let word = &src[p..e];
         let args = ctx.skip_spaces_from(e);
-        let known = [spec.keywords, spec.builtins, spec.constants, spec.variables]
-            .iter()
-            .any(|list| list.iter().any(|w| w.as_bytes() == word));
-        if !known && (b == b'>' || (call && args > e && args < end)) {
+        let helper = b == b'>' || (call && args > e && args < end);
+        if helper && Lexer::new(ctx, spec).word_kind(word).is_none() {
             ctx.emit(p, e, Kind::Function);
             p = e;
         }
@@ -1062,7 +1161,7 @@ static LIQUID_SPEC: Spec = Spec {
         "break", "continue", "cycle", "tablerow", "endtablerow", "assign", "capture", "endcapture", "increment",
         "decrement", "include", "render", "layout", "section", "sections", "schema", "endschema", "form", "endform",
         "paginate", "endpaginate", "with", "as", "and", "or", "contains", "liquid", "echo", "comment", "endcomment",
-        "raw", "endraw", "limit", "offset", "reversed", "by", "javascript", "endjavascript", "style", "endstyle",
+        "raw", "endraw", "reversed", "by", "javascript", "endjavascript", "style", "endstyle",
     ],
     constants: &["true", "false", "nil", "null", "empty", "blank"],
     variables: &["forloop", "tablerowloop"],
@@ -1107,26 +1206,6 @@ static LIQUID_TEMPLATE: Template = Template {
 
 // Handlebars and Go templates
 
-/// `key=value` hash arguments.
-fn handlebars_hook(lx: &mut Lexer) -> bool {
-    let ctx = &mut *lx.ctx;
-    let at = ctx.pos;
-    if ctx.peek_at(1) == b'=' {
-        return false;
-    }
-    let mut s = at;
-    while s > 0 && (is_ident(ctx.src[s - 1]) || ctx.src[s - 1] == b'-') {
-        s -= 1;
-    }
-    if s < at {
-        ctx.truncate_to(s);
-        ctx.emit(s, at, Kind::Property);
-    }
-    ctx.token(1, Kind::Operator);
-    lx.mark_operator();
-    true
-}
-
 static HANDLEBARS_SPEC: Spec = Spec {
     strings: &[Str::quoted("\""), Str::quoted("'")],
     keywords: &["if", "unless", "each", "with", "else", "as", "lookup", "log", "let", "in", "yield"],
@@ -1134,15 +1213,15 @@ static HANDLEBARS_SPEC: Spec = Spec {
     variables: &["this"],
     sigils: &[(b'@', Kind::Variable)],
     ident_chars: "-",
-    features: MEMBERS | LISP_CALLS,
-    hook: Some(handlebars_hook),
-    hook_chars: "=",
+    // `key=value` hash arguments.
+    features: MEMBERS | LISP_CALLS | ASSIGN_KEYS,
     ..Spec::DEFAULT
 };
 
 static HANDLEBARS_TEMPLATE: Template = Template {
     delims: &[
         delim("\\{{", "", Body::Literal),
+        delim("{{=", "}}", Body::SetDelims),
         delim("{{!--", "--}}", Body::Comment),
         delim("{{!", "}}", Body::Comment),
         delim("{{{", "}}}", Body::Helper(&HANDLEBARS_SPEC)),
@@ -1153,6 +1232,73 @@ static HANDLEBARS_TEMPLATE: Template = Template {
     mark: Kind::Punctuation,
     hook: None,
 };
+
+/// Lexes the rest of the input from the set delimiter tag at `at`, following
+/// every delimiter change. Returns the end of input.
+fn mustache<'s>(tp: &mut Tpl<'_, 's, '_>, mut at: usize, mut open: &'s [u8], mut close: &'s [u8]) -> usize {
+    let src = tp.ctx.src;
+    let len = src.len();
+    loop {
+        // `open=` new delimiters `=close`.
+        let inner = at + open.len() + 1;
+        let mut c = inner;
+        let stop = loop {
+            match tp.ctx.find(c, close) {
+                Some(p) if p > inner && src[p - 1] == b'=' => break Some(p - 1),
+                Some(p) => c = p + 1,
+                None => break None,
+            }
+        };
+        let Some(stop) = stop else {
+            tp.flush(at);
+            return len;
+        };
+        tp.flush(at);
+        let ctx = &mut *tp.ctx;
+        let end = stop + 1 + close.len();
+        ctx.emit(at, inner, Kind::Punctuation);
+        let mut parts = src[inner..stop].split(|b| b.is_ascii_whitespace()).filter(|w| !w.is_empty());
+        let (a, b) = (parts.next(), parts.next());
+        for part in [a, b].into_iter().flatten() {
+            let s = part.as_ptr() as usize - src.as_ptr() as usize;
+            ctx.emit(s, s + part.len(), Kind::String);
+        }
+        ctx.emit(stop, end, Kind::Punctuation);
+        ctx.pos = end;
+        tp.text = end;
+        if let (Some(a), Some(b), None) = (a, b, parts.next()) {
+            if !a.contains(&b'=') && !b.contains(&b'=') {
+                (open, close) = (a, b);
+            }
+        }
+        // Tags with the current delimiters, up to the next change.
+        let mut i = end;
+        loop {
+            let Some(p) = tp.ctx.find(i, open) else {
+                return len;
+            };
+            let inner = p + open.len();
+            if src.get(inner) == Some(&b'=') {
+                at = p;
+                break;
+            }
+            let c = tag_close(src, inner, close).unwrap_or(len);
+            let end = (c + close.len()).min(len);
+            tp.flush(p);
+            let ctx = &mut *tp.ctx;
+            if ctx.at(inner) == b'!' {
+                ctx.emit(p, end, Kind::Comment);
+            } else {
+                ctx.emit(p, inner, Kind::Punctuation);
+                helper(ctx, &HANDLEBARS_SPEC, inner, c);
+                ctx.emit(c, end, Kind::Punctuation);
+            }
+            ctx.pos = end;
+            tp.text = end;
+            i = end.max(p + 1);
+        }
+    }
+}
 
 /// Pipes and the bare `$` (the root context).
 fn go_template_hook(lx: &mut Lexer) -> bool {
@@ -1199,9 +1345,9 @@ static ERB_TEMPLATE: Template = Template {
     delims: &[
         delim("<%#", "%>", Body::Comment),
         delim("<%%", "", Body::Literal),
-        delim("<%=", "%>", Body::Code("ruby")),
-        delim("<%-", "%>", Body::Code("ruby")),
-        delim("<%", "%>", Body::Code("ruby")),
+        delim("<%=", "%>", Body::Code(RUBY)),
+        delim("<%-", "%>", Body::Code(RUBY)),
+        delim("<%", "%>", Body::Code(RUBY)),
     ],
     starts: b"<",
     trim: b"-=",
@@ -1213,10 +1359,10 @@ static EJS_TEMPLATE: Template = Template {
     delims: &[
         delim("<%#", "%>", Body::Comment),
         delim("<%%", "", Body::Literal),
-        delim("<%=", "%>", Body::Code("javascript")),
-        delim("<%-", "%>", Body::Code("javascript")),
-        delim("<%_", "%>", Body::Code("javascript")),
-        delim("<%", "%>", Body::Code("javascript")),
+        delim("<%=", "%>", Body::Code(JS)),
+        delim("<%-", "%>", Body::Code(JS)),
+        delim("<%_", "%>", Body::Code(JS)),
+        delim("<%", "%>", Body::Code(JS)),
     ],
     starts: b"<",
     trim: b"-_",
@@ -1284,7 +1430,7 @@ fn blade_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
 // Razor
 
 static RAZOR_TEMPLATE: Template =
-    Template { delims: &[], starts: b"@}", trim: b"", mark: Kind::Punctuation, hook: Some(razor_hook) };
+    Template { delims: &[], starts: b"@", trim: b"", mark: Kind::Punctuation, hook: Some(razor_hook) };
 
 const RAZOR_BLOCKS: &[&[u8]] = &[b"if", b"for", b"foreach", b"while", b"switch", b"lock", b"try", b"do", b"section"];
 
@@ -1293,46 +1439,36 @@ const RAZOR_DIRECTIVES: &[&[u8]] = &[
     b"removeTagHelper", b"attribute", b"rendermode", b"typeparam", b"preservewhitespace",
 ];
 
+const VOID_ELEMENTS: &[&[u8]] = &[
+    b"area", b"base", b"br", b"col", b"embed", b"hr", b"img", b"input", b"link", b"meta", b"source", b"track", b"wbr",
+];
+
 fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
     let src = tp.ctx.src;
-    let len = src.len();
-    if src[at] == b'}' {
-        // The end of a code block opened by `@if (...) {` and friends.
-        if tp.depth == 0 || !tp.ctx.at_line_start(at) {
-            return None;
-        }
-        tp.flush(at);
-        tp.depth -= 1;
-        tp.ctx.emit(at, at + 1, Kind::Punctuation);
-        let p = skip_whitespace_from(tp.ctx, at + 1);
-        let w = name_end(tp.ctx, p, b"");
-        let end = if matches!(&src[p..w], b"else" | b"catch" | b"finally" | b"while") {
-            razor_block(tp, p, w)
-        } else {
-            at + 1
-        };
-        tp.ctx.pos = end;
-        tp.text = end;
-        return Some(end);
-    }
+    let len = tp.end;
     if at > 0 && is_ident(src[at - 1]) {
         return None;
     }
-    let next = tp.ctx.at(at + 1);
+    let next = if at + 1 < len { src[at + 1] } else { 0 };
     let end = match next {
         b'@' => return Some(at + 2),
         b'*' => {
             tp.flush(at);
-            let end = tp.ctx.find(at + 2, b"*@").map_or(len, |p| p + 2);
+            let end = tp.ctx.find_in(at + 2, len, b"*@").map_or(len, |p| p + 2);
             tp.ctx.emit(at, end, Kind::Comment);
             end
         }
-        b'{' | b'(' => {
+        b'{' => {
+            tp.flush(at);
+            tp.ctx.emit(at, at + 2, Kind::Punctuation);
+            razor_code(tp, at + 2)
+        }
+        b'(' => {
             tp.flush(at);
             let close = matching(src, at + 1, len, true).unwrap_or(len);
             let ctx = &mut *tp.ctx;
             ctx.emit(at, at + 2, Kind::Punctuation);
-            ctx.embed(lang("csharp"), at + 2, close);
+            ctx.embed(CSHARP, at + 2, close);
             ctx.emit(close, close + 1, Kind::Punctuation);
             (close + 1).min(len)
         }
@@ -1342,19 +1478,20 @@ fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
             at + 2
         }
         _ if is_ident_start(next) => {
-            let w = name_end(tp.ctx, at + 1, b"");
+            let w = name_end(tp.ctx, at + 1, b"").min(len);
             let word = &src[at + 1..w];
             tp.flush(at);
             if RAZOR_BLOCKS.contains(&word) || (word == b"using" && tp.ctx.next_non_space(w) == b'(') {
                 razor_block(tp, at, w)
             } else if word == b"code" || word == b"functions" {
+                // Class members: plain C#.
                 let ctx = &mut *tp.ctx;
                 ctx.emit(at, w, Kind::Keyword);
                 let p = skip_whitespace_from(ctx, w);
-                if ctx.at(p) == b'{' {
+                if ctx.at(p) == b'{' && p < len {
                     let c = matching(src, p, len, true).unwrap_or(len);
                     ctx.emit(p, p + 1, Kind::Punctuation);
-                    ctx.embed(lang("csharp"), p + 1, c);
+                    ctx.embed(CSHARP, p + 1, c);
                     ctx.emit(c, c + 1, Kind::Punctuation);
                     (c + 1).min(len)
                 } else {
@@ -1363,8 +1500,8 @@ fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
             } else if RAZOR_DIRECTIVES.contains(&word) && tp.ctx.at_line_start(at) {
                 let ctx = &mut *tp.ctx;
                 ctx.emit(at, w, Kind::Keyword);
-                let e = ctx.line_end(w);
-                ctx.embed(lang("csharp"), w, e);
+                let e = ctx.line_end(w).min(len);
+                ctx.embed(CSHARP, w, e);
                 e
             } else {
                 // Implicit expression: `@Model.Items[0].Name`, `@Html.Raw(x)`, `@await F()`.
@@ -1379,9 +1516,10 @@ fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
                         _ => break,
                     }
                 }
+                let e = e.min(len);
                 let ctx = &mut *tp.ctx;
                 ctx.emit(at, at + 1, Kind::Punctuation);
-                ctx.embed(lang("csharp"), at + 1, e);
+                ctx.embed(CSHARP, at + 1, e);
                 e
             }
         }
@@ -1392,39 +1530,210 @@ fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
     Some(end)
 }
 
-/// A keyword with an optional `(condition)` and a `{` that opens a block of markup.
+/// `@if (...) { ... } else { ... }` and the other block statements: a keyword
+/// with an optional `(condition)`, a code block and its continuations.
 fn razor_block(tp: &mut Tpl, start: usize, word_end: usize) -> usize {
-    let ctx = &mut *tp.ctx;
-    let src = ctx.src;
-    ctx.emit(start, word_end, Kind::Keyword);
-    let mut end = word_end;
-    let mut p = skip_whitespace_from(ctx, end);
-    if src[p..].starts_with(b"if") && !is_ident(ctx.at(p + 2)) {
-        ctx.emit(p, p + 2, Kind::Keyword);
-        end = p + 2;
-        p = skip_whitespace_from(ctx, end);
-    }
-    if ctx.at(p) == b'(' {
-        if let Some(c) = matching(src, p, near(p, src.len()), true) {
-            ctx.emit(p, p + 1, Kind::Punctuation);
-            ctx.embed(lang("csharp"), p + 1, c);
-            ctx.emit(c, c + 1, Kind::Punctuation);
-            end = c + 1;
-            p = skip_whitespace_from(ctx, end);
+    let src = tp.ctx.src;
+    let len = tp.end;
+    let mut word = start;
+    let mut word_end = word_end;
+    loop {
+        let ctx = &mut *tp.ctx;
+        ctx.emit(word, word_end, Kind::Keyword);
+        let mut end = word_end;
+        let mut p = skip_whitespace_from(ctx, end).min(len);
+        if src[p..len].starts_with(b"if") && !is_ident(ctx.at(p + 2)) {
+            ctx.emit(p, p + 2, Kind::Keyword);
+            end = p + 2;
+            p = skip_whitespace_from(ctx, end).min(len);
         }
-    } else if is_ident_start(ctx.at(p)) {
-        // `@section Scripts {`
-        let e = name_end(ctx, p, b"");
-        ctx.emit(p, e, Kind::Function);
-        end = e;
-        p = skip_whitespace_from(ctx, e);
-    }
-    if ctx.at(p) == b'{' {
+        if ctx.at(p) == b'(' {
+            if let Some(c) = matching(src, p, near(p, len), true) {
+                ctx.emit(p, p + 1, Kind::Punctuation);
+                ctx.embed(CSHARP, p + 1, c);
+                ctx.emit(c, c + 1, Kind::Punctuation);
+                end = c + 1;
+                p = skip_whitespace_from(ctx, end).min(len);
+            }
+        } else if is_ident_start(ctx.at(p)) && p < len {
+            // `@section Scripts {`
+            let e = name_end(ctx, p, b"").min(len);
+            ctx.emit(p, e, Kind::Function);
+            end = e;
+            p = skip_whitespace_from(ctx, e).min(len);
+        }
+        if ctx.at(p) != b'{' || p >= len {
+            return end;
+        }
         ctx.emit(p, p + 1, Kind::Punctuation);
-        tp.depth += 1;
-        end = p + 1;
+        end = razor_code(tp, p + 1);
+        // `} else {`, `} catch (e) {`, `} finally {` and `} while (x);`.
+        let p = skip_whitespace_from(tp.ctx, end).min(len);
+        let e = name_end(tp.ctx, p, b"").min(len);
+        if !matches!(&src[p..e], b"else" | b"catch" | b"finally" | b"while") {
+            return end;
+        }
+        (word, word_end) = (p, e);
     }
+}
+
+/// A code block from `from`, just after its `{`: C# statements with markup in
+/// elements and `@:` lines. Returns the end of the closing `}`.
+fn razor_code(tp: &mut Tpl, from: usize) -> usize {
+    let src = tp.ctx.src;
+    let len = tp.end;
+    if !tp.ctx.can_nest() {
+        let close = matching(src, from - 1, len, true).unwrap_or(len);
+        tp.ctx.embed(CSHARP, from, close);
+        tp.ctx.emit(close, close + 1, Kind::Punctuation);
+        return (close + 1).min(len);
+    }
+    tp.ctx.enter();
+    let mut p = from;
+    let end = loop {
+        p = skip_whitespace_from(tp.ctx, p).min(len);
+        if p >= len {
+            break len;
+        }
+        let next = tp.ctx.at(p + 1);
+        match src[p] {
+            b'}' => {
+                tp.ctx.emit(p, p + 1, Kind::Punctuation);
+                break p + 1;
+            }
+            b'<' if next.is_ascii_alphabetic() || next == b'/' => {
+                let e = razor_element_end(src, p, len);
+                razor_markup(tp, p, e);
+                p = e;
+            }
+            b'@' if next == b':' => {
+                let e = start_of_cr(tp.ctx, tp.ctx.line_end(p)).min(len);
+                tp.ctx.emit(p, p + 2, Kind::Punctuation);
+                razor_markup(tp, p + 2, e);
+                p = e;
+            }
+            b'@' if next == b'*' => {
+                let e = tp.ctx.find_in(p + 2, len, b"*@").map_or(len, |c| c + 2);
+                tp.ctx.emit(p, e, Kind::Comment);
+                p = e;
+            }
+            _ => p = razor_statement(tp, p).max(p + 1),
+        }
+    };
+    tp.ctx.leave();
+    tp.ctx.pos = end;
     end
+}
+
+/// One C# statement in a code block from `start`: up to a `;`, a nested
+/// block, an unbalanced `}` or markup. Returns where it stops.
+fn razor_statement(tp: &mut Tpl, start: usize) -> usize {
+    let src = tp.ctx.src;
+    let len = tp.end;
+    let ctx = &*tp.ctx;
+    let mut depth = 0usize;
+    let mut i = start;
+    let stop = loop {
+        if i >= len {
+            break len;
+        }
+        let b = src[i];
+        let next = ctx.at(i + 1);
+        match b {
+            b'"' | b'\'' => {
+                // Verbatim strings (`@"C:\dir"`) double their quotes instead of escaping.
+                let verbatim = b == b'"' && i > 0 && (src[i - 1] == b'@' || (i > 1 && src[i - 2] == b'@'));
+                let mut j = i + 1;
+                while j < len && src[j] != b && (verbatim || src[j] != b'\n') {
+                    j += 1 + (!verbatim && src[j] == b'\\') as usize;
+                }
+                i = j;
+            }
+            b'/' if next == b'/' => i = ctx.line_end(i).min(len),
+            b'/' if next == b'*' => i = ctx.find_in(i + 2, len, b"*/").map_or(len, |c| c + 1),
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => break i + 1,
+            b'{' | b'}' if depth == 0 => break i,
+            // Markup at the start of a line or after a label, as in `case 1: <p>`.
+            b'<' if depth == 0
+                && i > start
+                && (next.is_ascii_alphabetic() || next == b'/')
+                && (ctx.at_line_start(i) || matches!(ctx.prev_non_space(i), b':' | b';' | b'{' | b'}')) =>
+            {
+                break i;
+            }
+            b'@' if next == b':' && i > start && ctx.at_line_start(i) => break i,
+            _ => {}
+        }
+        i += 1;
+    };
+    tp.ctx.embed(CSHARP, start, stop);
+    if stop < len && src[stop] == b'{' {
+        tp.ctx.emit(stop, stop + 1, Kind::Punctuation);
+        return razor_code(tp, stop + 1);
+    }
+    stop
+}
+
+/// End of the markup element at `at` in a code block: through its matching
+/// close tag, or just the tag itself for void, self closing and close tags.
+fn razor_element_end(src: &[u8], at: usize, len: usize) -> usize {
+    let close_tag = src.get(at + 1) == Some(&b'/');
+    let name_start = at + 1 + close_tag as usize;
+    let mut name_stop = name_start;
+    while name_stop < len && (is_ident(src[name_stop]) || matches!(src[name_stop], b'-' | b':' | b'.')) {
+        name_stop += 1;
+    }
+    let name = &src[name_start..name_stop];
+    // The end of the start tag, skipping quoted attribute values.
+    let mut i = name_stop;
+    while i < len && src[i] != b'>' {
+        if matches!(src[i], b'"' | b'\'') {
+            let q = src[i];
+            i += 1;
+            while i < len && src[i] != q {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    let tag_end = (i + 1).min(len);
+    if close_tag || src[..tag_end].ends_with(b"/>") || VOID_ELEMENTS.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+        return tag_end;
+    }
+    let mut depth = 1usize;
+    let mut i = tag_end;
+    while let Some(k) = src[i..len].iter().position(|&b| b == b'<') {
+        let lt = i + k;
+        let closing = src.get(lt + 1) == Some(&b'/');
+        let n = lt + 1 + closing as usize;
+        let same = src.len() >= n + name.len()
+            && src[n..n + name.len()].eq_ignore_ascii_case(name)
+            && !src.get(n + name.len()).is_some_and(|&b| is_ident(b) || b == b'-');
+        if same && closing {
+            depth -= 1;
+            if depth == 0 {
+                return src[lt..len].iter().position(|&b| b == b'>').map_or(len, |g| lt + g + 1);
+            }
+        } else if same {
+            depth += 1;
+        }
+        i = lt + 1;
+    }
+    len
+}
+
+/// Markup inside a code block, with its own `@` expressions and blocks.
+fn razor_markup(tp: &mut Tpl, start: usize, end: usize) {
+    let (html, outer) = (tp.html, tp.end);
+    tp.html = Html::Text;
+    tp.text = start;
+    tp.end = end;
+    run_template(tp, &RAZOR_TEMPLATE, start, end);
+    tp.html = html;
+    tp.end = outer;
+    tp.text = end;
 }
 
 // reStructuredText
@@ -1513,7 +1822,7 @@ fn rst_line(ctx: &mut Ctx, start: usize, end: usize, ind: usize) -> bool {
     // Doctest blocks.
     if content.starts_with(b">>>") {
         ctx.emit(at, at + 3, Kind::Punctuation);
-        ctx.embed(lang("python"), at + 3, content_end);
+        ctx.embed(PYTHON, at + 3, content_end);
         return false;
     }
     let mut p = at;
@@ -1536,7 +1845,7 @@ fn rst_line(ctx: &mut Ctx, start: usize, end: usize, ind: usize) -> bool {
             // Grid table rows.
             let mut p = at;
             for (i, _) in content.iter().enumerate().filter(|(_, &b)| b == b'|') {
-                rst_inline(ctx, p, at + i);
+                rst_inline(ctx, p, at + i, false);
                 ctx.emit(at + i, at + i + 1, Kind::Punctuation);
                 p = at + i + 1;
             }
@@ -1565,7 +1874,7 @@ fn rst_line(ctx: &mut Ctx, start: usize, end: usize, ind: usize) -> bool {
         ctx.emit(at, content_end, Kind::Punctuation);
         return true;
     }
-    rst_inline(ctx, p, content_end);
+    rst_inline(ctx, p, content_end, true);
     true
 }
 
@@ -1596,7 +1905,7 @@ fn rst_explicit(ctx: &mut Ctx, start: usize, end: usize, ind: usize) {
         if let Some(close) = src[p..line_end].iter().position(|&b| b == b']').map(|i| p + i) {
             ctx.emit(at, at + 2, Kind::Punctuation);
             ctx.emit(p, close + 1, Kind::Link);
-            rst_inline(ctx, close + 1, line_end);
+            rst_inline(ctx, close + 1, line_end, false);
             ctx.pos = line_end;
             return;
         }
@@ -1625,7 +1934,7 @@ fn rst_explicit(ctx: &mut Ctx, start: usize, end: usize, ind: usize) {
         ctx.emit(p, s, Kind::Variable);
     }
     if !directive {
-        rst_inline(ctx, name_start, line_end);
+        rst_inline(ctx, name_start, line_end, false);
         ctx.pos = line_end;
         return;
     }
@@ -1634,7 +1943,7 @@ fn rst_explicit(ctx: &mut Ctx, start: usize, end: usize, ind: usize) {
     ctx.emit(name_stop, name_stop + 2, Kind::Punctuation);
     let args = ctx.skip_spaces_from(name_stop + 2).min(line_end);
     if RST_PROSE_DIRECTIVES.contains(&name) {
-        rst_inline(ctx, args, line_end);
+        rst_inline(ctx, args, line_end, false);
     } else {
         ctx.emit(args, line_end, Kind::String);
     }
@@ -1677,26 +1986,28 @@ fn rst_opens(b: u8) -> bool {
     !b.is_ascii_alphanumeric() && b != b'\\' && b < 0x80
 }
 
-fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
+/// Inline markup in `[start, end)`. With `wrap`, a span may continue on the
+/// following lines of the paragraph, and lexing then goes on to the end of
+/// the line where it closes.
+fn rst_inline(ctx: &mut Ctx, start: usize, mut end: usize, wrap: bool) {
     let src = ctx.src;
+    let lines = if wrap { WRAP_LINES } else { 0 };
     let mut i = start;
     while i < end {
         let b = src[i];
         let opens = i == start || rst_opens(src[i - 1]);
         let next = if i + 1 < end { src[i + 1] } else { b' ' };
+        let mut span = None;
         match b {
             b'\\' if next.is_ascii_punctuation() || next.is_ascii_alphanumeric() => {
                 ctx.emit(i, i + 2, Kind::Escape);
                 i += 2;
             }
-            b'`' if opens && next == b'`' => match find_in(ctx, i + 2, end, b"``") {
-                Some(c) => {
-                    ctx.emit(i, c + 2, Kind::String);
-                    i = c + 2;
-                }
+            b'`' if opens && next == b'`' => match closer(ctx, i + 2, end, lines, b"``", |_| true) {
+                Some(c) => span = Some((c + 2, Kind::String)),
                 None => i += 2,
             },
-            b'`' if opens => match src[i + 1..end].iter().position(|&c| c == b'`').map(|k| i + 1 + k) {
+            b'`' if opens => match closer(ctx, i + 1, end, lines, b"`", |_| true) {
                 Some(c) => {
                     let mut e = c + 1;
                     let mut kind = Kind::String;
@@ -1704,9 +2015,7 @@ fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
                         kind = Kind::Link;
                         e += 1 + (ctx.at(e + 1) == b'_') as usize;
                     }
-                    let e = e.min(end);
-                    ctx.emit(i, e, kind);
-                    i = e;
+                    span = Some((e, kind));
                 }
                 None => i += 1,
             },
@@ -1733,17 +2042,14 @@ fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i = from;
                     continue;
                 }
-                match find_in(ctx, from + 1, end, delim).filter(|&c| !src[c - 1].is_ascii_whitespace()) {
-                    Some(c) => {
-                        ctx.emit(i, c + delim.len(), if strong { Kind::Strong } else { Kind::Emphasis });
-                        i = c + delim.len();
-                    }
+                match closer(ctx, from + 1, end, lines, delim, |c| !src[c - 1].is_ascii_whitespace()) {
+                    Some(c) => span = Some((c + delim.len(), if strong { Kind::Strong } else { Kind::Emphasis })),
                     None => i = from,
                 }
             }
             b'|' if opens && !next.is_ascii_whitespace() && next != b'|' => {
-                match src[i + 1..end].iter().position(|&c| c == b'|').map(|k| i + 1 + k) {
-                    Some(c) if !src[c - 1].is_ascii_whitespace() => {
+                match closer(ctx, i + 1, end, 0, b"|", |c| !src[c - 1].is_ascii_whitespace()) {
+                    Some(c) => {
                         let mut e = c + 1;
                         while e < end && src[e] == b'_' && e < c + 3 {
                             e += 1;
@@ -1751,10 +2057,10 @@ fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
                         ctx.emit(i, e, Kind::Variable);
                         i = e;
                     }
-                    _ => i += 1,
+                    None => i += 1,
                 }
             }
-            b'[' if opens => match src[i..end].iter().position(|&c| c == b']').map(|k| i + k) {
+            b'[' if opens => match closer(ctx, i, end, 0, b"]", |_| true) {
                 Some(c) if ctx.at(c + 1) == b'_' && c + 2 <= end => {
                     ctx.emit(i, c + 2, Kind::Link);
                     i = c + 2;
@@ -1778,6 +2084,14 @@ fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
                 i = e;
             }
             _ => i += 1,
+        }
+        if let Some((e, kind)) = span {
+            ctx.emit(i, e, kind);
+            i = e;
+            if e > end {
+                end = content_line_end(ctx, e);
+                ctx.pos = ctx.line_end(e);
+            }
         }
     }
     ctx.pos = ctx.pos.max(end);
@@ -1867,7 +2181,7 @@ fn adoc_block(ctx: &mut Ctx, start: usize, end: usize, source: Option<(usize, us
     }
     match kind {
         b'/' => ctx.emit(start, close.1, Kind::Comment),
-        b'+' => ctx.embed(lang("html"), body, close.0),
+        b'+' => ctx.embed(HTML, body, close.0),
         _ => match language {
             Some(name) => embed_named(ctx, name, body, close.0),
             None => ctx.emit(body, close.0, Kind::String),
@@ -1940,7 +2254,7 @@ fn adoc_line(ctx: &mut Ctx, start: usize, end: usize) {
     } else if line[0] == b'|' {
         ctx.emit(start, start + 1, Kind::Punctuation);
         p = start + 1;
-    } else if let Some(i) = find_in(ctx, start, end, b"::").filter(|&i| i > start) {
+    } else if let Some(i) = ctx.find_in(start, end, b"::").filter(|&i| i > start) {
         // Description lists: `term:: definition`.
         if matches!(ctx.at(i + 2), b' ' | b'\t' | b'\r' | b'\n' | 0) || i + 2 == end {
             ctx.emit(start, i, Kind::Property);
@@ -1956,7 +2270,10 @@ fn adoc_opens(b: u8) -> bool {
     !b.is_ascii_alphanumeric() && b != b'\\' && b < 0x80
 }
 
-fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
+/// Inline markup in `[start, end)`. A span may continue on the following
+/// lines of the paragraph, and lexing then goes on to the end of the line
+/// where it closes.
+fn adoc_inline(ctx: &mut Ctx, start: usize, mut end: usize) {
     let src = ctx.src;
     let mut i = start;
     while i < end {
@@ -1980,8 +2297,8 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i = from;
                     continue;
                 }
-                let close = find_in(ctx, from + 1, end, delim).filter(|&c| {
-                    !src[c - 1].is_ascii_whitespace() && (double || c + 1 >= end || !src[c + 1].is_ascii_alphanumeric())
+                let close = closer(ctx, from + 1, end, WRAP_LINES, delim, |c| {
+                    !src[c - 1].is_ascii_whitespace() && (double || !ctx.at(c + 1).is_ascii_alphanumeric())
                 });
                 match close {
                     Some(c) => {
@@ -1990,8 +2307,13 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
                             b'_' | b'#' => Kind::Emphasis,
                             _ => Kind::String,
                         };
-                        ctx.emit(i, c + delim.len(), kind);
-                        i = c + delim.len();
+                        let e = c + delim.len();
+                        ctx.emit(i, e, kind);
+                        i = e;
+                        if e > end {
+                            end = content_line_end(ctx, e);
+                            ctx.pos = ctx.line_end(e);
+                        }
                     }
                     None => i = from,
                 }
@@ -2005,7 +2327,7 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i += 1;
                 }
             }
-            b'<' if next == b'<' => match find_in(ctx, i + 2, end, b">>") {
+            b'<' if next == b'<' => match closer(ctx, i + 2, end, 0, b">>", |_| true) {
                 Some(c) => {
                     ctx.emit(i, c + 2, Kind::Link);
                     i = c + 2;
@@ -2026,7 +2348,9 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
                 // Inline macros: `link:url[text]`, `kbd:[Ctrl+C]`, `footnote:[note]`.
                 let w = name_end(ctx, i, b"-");
                 if ctx.at(w) == b':' && w + 1 < end && !matches!(ctx.at(w + 1), b' ' | b':') {
-                    let target_end = src[w..end].iter().position(|&c| c == b'[' || c == b' ').map_or(end, |k| w + k);
+                    let reach = near(w, end);
+                    let target_end =
+                        src[w..reach].iter().position(|&c| c == b'[' || c == b' ').map_or(reach, |k| w + k);
                     if ctx.at(target_end) == b'[' {
                         let e = adoc_macro_text(src, target_end, end);
                         let name = &src[i..w];
@@ -2142,11 +2466,11 @@ fn org_line(ctx: &mut Ctx, start: usize, end: usize) {
         }
         let mut p = at;
         while let Some(i) = src[p..line_end].iter().position(|&b| b == b'|') {
-            org_inline(ctx, p, p + i);
+            org_inline(ctx, p, p + i, false);
             ctx.emit(p + i, p + i + 1, Kind::Punctuation);
             p += i + 1;
         }
-        org_inline(ctx, p, line_end);
+        org_inline(ctx, p, line_end, false);
         return;
     }
     let mut p = at;
@@ -2168,13 +2492,13 @@ fn org_line(ctx: &mut Ctx, start: usize, end: usize) {
             ctx.emit(p, p + 3, Kind::Constant);
             p += 3;
         }
-        if let Some(i) = find_in(ctx, p, line_end, b" :: ") {
+        if let Some(i) = ctx.find_in(p, line_end, b" :: ") {
             ctx.emit(p, i, Kind::Property);
             ctx.emit(i + 1, i + 3, Kind::Punctuation);
             p = i + 3;
         }
     }
-    org_inline(ctx, p, line_end);
+    org_inline(ctx, p, line_end, true);
 }
 
 /// `#+KEY: value` lines and `#+BEGIN_...` blocks.
@@ -2247,7 +2571,9 @@ fn org_closes(b: u8) -> bool {
     )
 }
 
-fn org_inline(ctx: &mut Ctx, start: usize, end: usize) {
+/// Inline markup in `[start, end)`. Emphasis may continue on the next line,
+/// and lexing then goes on to the end of that line.
+fn org_inline(ctx: &mut Ctx, start: usize, mut end: usize, wrap: bool) {
     let src = ctx.src;
     let mut i = start;
     while i < end {
@@ -2260,15 +2586,8 @@ fn org_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i += 1;
                     continue;
                 }
-                let close = src[i + 2..end]
-                    .iter()
-                    .enumerate()
-                    .position(|(k, &c)| {
-                        let at = i + 2 + k;
-                        c == b && !src[at - 1].is_ascii_whitespace() && org_closes(ctx.at(at + 1))
-                    })
-                    .map(|k| i + 2 + k);
-                match close {
+                let ok = |c: usize| !src[c - 1].is_ascii_whitespace() && org_closes(ctx.at(c + 1));
+                match closer(ctx, i + 2, end, wrap as usize, &src[i..i + 1], ok) {
                     Some(c) => {
                         let kind = match b {
                             b'*' => Kind::Strong,
@@ -2278,36 +2597,40 @@ fn org_inline(ctx: &mut Ctx, start: usize, end: usize) {
                         };
                         ctx.emit(i, c + 1, kind);
                         i = c + 1;
+                        if c >= end {
+                            end = content_line_end(ctx, c);
+                            ctx.pos = ctx.line_end(c);
+                        }
                     }
                     None => i += 1,
                 }
             }
-            b'[' if ctx.at(i + 1) == b'[' => match find_in(ctx, i + 2, end, b"]]") {
+            b'[' if ctx.at(i + 1) == b'[' => match closer(ctx, i + 2, end, 0, b"]]", |_| true) {
                 Some(c) => {
                     ctx.emit(i, c + 2, Kind::Link);
                     i = c + 2;
                 }
                 None => i += 2,
             },
-            b'[' if src[i..end].starts_with(b"[fn:") => match src[i..end].iter().position(|&c| c == b']') {
+            b'[' if src[i..end].starts_with(b"[fn:") => match closer(ctx, i, end, 0, b"]", |_| true) {
                 Some(c) => {
-                    ctx.emit(i, i + c + 1, Kind::Link);
-                    i += c + 1;
+                    ctx.emit(i, c + 1, Kind::Link);
+                    i = c + 1;
                 }
                 None => i += 1,
             },
             b'<' | b'[' if ctx.at(i + 1).is_ascii_digit() && ctx.at(i + 5) == b'-' => {
                 // Timestamps: <2024-03-01 Fri 10:00> and [2024-03-01].
-                let close = if b == b'<' { b'>' } else { b']' };
-                match src[i..end].iter().position(|&c| c == close) {
+                let close: &[u8] = if b == b'<' { b">" } else { b"]" };
+                match closer(ctx, i, end, 0, close, |_| true) {
                     Some(c) => {
-                        ctx.emit(i, i + c + 1, Kind::Constant);
-                        i += c + 1;
+                        ctx.emit(i, c + 1, Kind::Constant);
+                        i = c + 1;
                     }
                     None => i += 1,
                 }
             }
-            b'<' if ctx.at(i + 1) == b'<' => match find_in(ctx, i + 2, end, b">>") {
+            b'<' if ctx.at(i + 1) == b'<' => match closer(ctx, i + 2, end, 0, b">>", |_| true) {
                 Some(c) => {
                     ctx.emit(i, c + 2, Kind::Link);
                     i = c + 2;
@@ -2326,7 +2649,7 @@ fn org_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     ctx.emit(i, w + 1, Kind::Keyword);
                     i = w + 1;
                 } else if word.starts_with(b"src_") && ctx.at(w) == b'{' {
-                    let c = src[w..end].iter().position(|&c| c == b'}').map_or(end, |k| w + k + 1);
+                    let c = closer(ctx, w, end, 0, b"}", |_| true).map_or(end, |c| c + 1);
                     ctx.emit(i, c, Kind::String);
                     i = c;
                 } else {
@@ -2410,14 +2733,7 @@ fn typst_markup(ctx: &mut Ctx, nested: bool) {
                 None => ctx.pos += 1,
             },
             b'`' => typst_raw(ctx),
-            b'$' => {
-                let mut e = i + 1;
-                while e < src.len() && src[e] != b'$' {
-                    e += 1 + (src[e] == b'\\') as usize;
-                }
-                ctx.pos = (e + 1).min(src.len());
-                ctx.emit(i, ctx.pos, Kind::String);
-            }
+            b'$' => typst_math(ctx),
             b'#' => typst_hash(ctx),
             b'<' if is_ident_start(next) => {
                 let e = name_end(ctx, i + 1, b"-.:");
@@ -2449,6 +2765,89 @@ fn typst_markup(ctx: &mut Ctx, nested: bool) {
                 ctx.pos = i + 1 + skip;
             }
         }
+    }
+}
+
+/// Math between `$` signs. Like LaTeX math, plain content is a string, with
+/// numbers, operators, `name(...)` calls and named symbols (`alpha`, `arrow.r`)
+/// picked out.
+fn typst_math(ctx: &mut Ctx) {
+    let src = ctx.src;
+    let start = ctx.pos;
+    let mut close = start + 1;
+    while close < src.len() && src[close] != b'$' {
+        match src[close] {
+            b'\\' => close += 1,
+            b'"' => close += 1 + src[close + 1..].iter().position(|&b| b == b'"').unwrap_or(src.len()),
+            _ => {}
+        }
+        close += 1;
+    }
+    let close = close.min(src.len());
+    ctx.token(1, Kind::String);
+    while ctx.pos < close {
+        let i = ctx.pos;
+        let b = src[i];
+        match b {
+            b' ' | b'\t' | b'\r' | b'\n' => ctx.pos += 1,
+            b'\\' => {
+                ctx.pos = (i + 1).min(close);
+                if ctx.pos < close {
+                    ctx.bump_char();
+                }
+                ctx.emit(i, ctx.pos, Kind::Escape);
+            }
+            b'"' => {
+                let e = src[i + 1..close].iter().position(|&b| b == b'"').map_or(close, |k| i + k + 2);
+                ctx.pos = e;
+                ctx.emit(i, e, Kind::String);
+            }
+            b'#' => {
+                typst_hash(ctx);
+                ctx.pos = ctx.pos.max(i + 1);
+            }
+            b'0'..=b'9' => {
+                let mut e = i;
+                while e < close && (src[e].is_ascii_digit() || (src[e] == b'.' && ctx.at(e + 1).is_ascii_digit())) {
+                    e += 1;
+                }
+                ctx.pos = e;
+                ctx.emit(i, e, Kind::Number);
+            }
+            b'+' | b'-' | b'*' | b'/' | b'=' | b'<' | b'>' | b'!' | b'^' | b'_' | b'|' | b'~' | b'\'' | b':' => {
+                ctx.token(1, Kind::Operator)
+            }
+            b'&' | b',' | b';' | b'(' | b')' | b'[' | b']' | b'{' | b'}' => ctx.token(1, Kind::Punctuation),
+            _ if b.is_ascii_alphabetic() => {
+                let mut e = i;
+                while e < close && src[e].is_ascii_alphabetic() {
+                    e += 1;
+                }
+                if e - i == 1 {
+                    // A single letter is a variable: `x`, `y`.
+                    ctx.pos = e;
+                    ctx.emit(i, e, Kind::String);
+                    continue;
+                }
+                while ctx.at(e) == b'.' && ctx.at(e + 1).is_ascii_alphabetic() && e + 1 < close {
+                    e += 1;
+                    while e < close && src[e].is_ascii_alphabetic() {
+                        e += 1;
+                    }
+                }
+                ctx.pos = e;
+                ctx.emit(i, e, if ctx.at(e) == b'(' { Kind::Function } else { Kind::Constant });
+            }
+            _ => {
+                ctx.bump_char();
+                ctx.pos = ctx.pos.min(close);
+                ctx.emit(i, ctx.pos, Kind::String);
+            }
+        }
+    }
+    ctx.pos = ctx.pos.max(close);
+    if ctx.at(close) == b'$' {
+        ctx.token(1, Kind::String);
     }
 }
 
@@ -2615,10 +3014,7 @@ fn typst_hook(lx: &mut Lexer) -> bool {
             true
         }
         b'$' => {
-            let start = ctx.pos;
-            let close = ctx.src[start + 1..].iter().position(|&b| b == b'$').map_or(ctx.len(), |i| start + i + 2);
-            ctx.pos = close;
-            ctx.emit(start, close, Kind::String);
+            typst_math(ctx);
             lx.mark_value();
             true
         }
@@ -2638,7 +3034,7 @@ static TYPST_SPEC: Spec = Spec {
     constants: &["true", "false", "none", "auto"],
     types: &["int", "float", "str", "bool", "array", "dictionary", "content", "length", "ratio", "angle", "color"],
     ident_chars: "-",
-    features: CALLS | MEMBERS | IDENT_KEYS | UNITS,
+    features: TIGHT_CALLS | MEMBERS | IDENT_KEYS | UNITS,
     hook: Some(typst_hook),
     hook_chars: "[$",
     ..Spec::DEFAULT
@@ -2787,23 +3183,33 @@ fn gherkin_step(ctx: &mut Ctx, start: usize, end: usize) {
 // Indentation based templates: Pug, Haml and Slim
 
 /// Text with `#{expr}` (and `!{expr}`) interpolation in `language`.
-fn interpolated_text(ctx: &mut Ctx, start: usize, end: usize, language: &str) {
+/// Pug (the JavaScript host) also has `#[tag text]` inline tags.
+fn interpolated_text(ctx: &mut Ctx, start: usize, end: usize, language: Language) {
     let src = ctx.src;
+    let pug = language == JS;
     let mut i = start;
-    while let Some(p) = find_in(ctx, i, end, b"{") {
-        if p == start || !matches!(src[p - 1], b'#' | b'!') || (p >= start + 2 && src[p - 2] == b'\\') {
+    while let Some(k) = src[i..end].iter().position(|&b| b == b'{' || (pug && b == b'[')) {
+        let p = i + k;
+        let tag = src[p] == b'[';
+        let opener = if tag { b"#".as_slice() } else { b"#!" };
+        if p == start || !opener.contains(&src[p - 1]) || (p >= start + 2 && src[p - 2] == b'\\') {
             i = p + 1;
             continue;
         }
-        match matching(src, p, end, true) {
-            Some(c) => {
-                ctx.emit(p - 1, p + 1, Kind::Punctuation);
-                ctx.embed(lang(language), p + 1, c);
-                ctx.emit(c, c + 1, Kind::Punctuation);
-                i = c + 1;
-            }
-            None => break,
+        let Some(c) = matching(src, p, (p + SCAN_LIMIT / 4).min(end), !tag) else {
+            i = p + 1;
+            continue;
+        };
+        ctx.emit(p - 1, p + 1, Kind::Punctuation);
+        if !tag {
+            ctx.embed(language, p + 1, c);
+        } else if ctx.can_nest() {
+            ctx.enter();
+            pug_inline(ctx, p + 1, c);
+            ctx.leave();
         }
+        ctx.emit(c, c + 1, Kind::Punctuation);
+        i = c + 1;
     }
     ctx.pos = ctx.pos.max(end);
 }
@@ -2865,7 +3271,7 @@ fn value_end(src: &[u8], from: usize, end: usize, comma: bool) -> usize {
 }
 
 /// `name=value` attribute lists inside `(...)`, with values in `language`.
-fn attribute_list(ctx: &mut Ctx, open: usize, close: usize, language: &str) {
+fn attribute_list(ctx: &mut Ctx, open: usize, close: usize, language: Language) {
     let src = ctx.src;
     ctx.emit(open, open + 1, Kind::Punctuation);
     let mut i = open + 1;
@@ -2890,12 +3296,10 @@ fn attribute_list(ctx: &mut Ctx, open: usize, close: usize, language: &str) {
                 }
                 ctx.emit(i, i + op, Kind::Operator);
                 let v = ctx.skip_spaces_from(i + op).min(close);
+                // Values are code, so quoted ones get the language's own
+                // interpolation: `href="/posts/#{post.id}"`.
                 i = value_end(src, v, close, true);
-                if matches!(ctx.at(v), b'"' | b'\'') && i == value_end(src, v, close, true) && src[i - 1] == src[v] {
-                    ctx.emit(v, i, Kind::String);
-                } else {
-                    ctx.embed(lang(language), v, i);
-                }
+                ctx.embed(language, v, i);
             }
         }
     }
@@ -2925,7 +3329,7 @@ fn pug_line(ctx: &mut Ctx, start: usize, end: usize) {
         return;
     }
     let rest = &src[at..line_end];
-    let js = lang("javascript");
+    let js = JS;
     if rest.starts_with(b"//") {
         comment_block(ctx, at, end, ind);
         return;
@@ -2933,9 +3337,9 @@ fn pug_line(ctx: &mut Ctx, start: usize, end: usize) {
     match rest[0] {
         b'|' => {
             ctx.emit(at, at + 1, Kind::Punctuation);
-            interpolated_text(ctx, at + 1, line_end, "javascript");
+            interpolated_text(ctx, at + 1, line_end, JS);
         }
-        b'<' => ctx.embed(lang("html"), at, line_end),
+        b'<' => ctx.embed(HTML, at, line_end),
         b'-' if rest.len() == 1 => {
             ctx.emit(at, at + 1, Kind::Punctuation);
             let block = indented_block(ctx, end, ind);
@@ -3017,7 +3421,7 @@ fn pug_tag(ctx: &mut Ctx, mut p: usize, mut line_end: usize, mut end: usize, ind
             }
             b'(' => match matching(src, p, near(p, ctx.len()), true) {
                 Some(close) => {
-                    attribute_list(ctx, p, close, "javascript");
+                    attribute_list(ctx, p, close, JS);
                     p = close + 1;
                     if p > line_end {
                         end = ctx.line_end(p);
@@ -3025,14 +3429,14 @@ fn pug_tag(ctx: &mut Ctx, mut p: usize, mut line_end: usize, mut end: usize, ind
                     }
                 }
                 None => {
-                    attribute_list(ctx, p, line_end, "javascript");
+                    attribute_list(ctx, p, line_end, JS);
                     p = line_end;
                 }
             },
             b'&' if src[p..line_end].starts_with(b"&attributes(") => {
                 ctx.emit(p, p + 11, Kind::Keyword);
                 let close = matching(src, p + 11, line_end, true).map_or(line_end, |c| c + 1);
-                ctx.embed(lang("javascript"), p + 11, close);
+                ctx.embed(JS, p + 11, close);
                 p = close;
             }
             b':' if ctx.at(p + 1) == b' ' => {
@@ -3056,21 +3460,60 @@ fn pug_tag(ctx: &mut Ctx, mut p: usize, mut line_end: usize, mut end: usize, ind
             ctx.emit(p, p + 1, Kind::Punctuation);
             let block = indented_block(ctx, end, ind);
             match tag {
-                b"script" => ctx.embed(lang("javascript"), end, block),
-                b"style" => ctx.embed(lang("css"), end, block),
-                _ => interpolated_text(ctx, end, block, "javascript"),
+                b"script" => ctx.embed(JS, end, block),
+                b"style" => ctx.embed(CSS, end, block),
+                _ => interpolated_text(ctx, end, block, JS),
             }
             ctx.pos = block;
         }
         b'=' => {
             ctx.emit(p, p + 1, Kind::Punctuation);
-            ctx.embed(lang("javascript"), p + 1, line_end);
+            ctx.embed(JS, p + 1, line_end);
         }
         b'!' if ctx.at(p + 1) == b'=' => {
             ctx.emit(p, p + 2, Kind::Punctuation);
-            ctx.embed(lang("javascript"), p + 2, line_end);
+            ctx.embed(JS, p + 2, line_end);
         }
-        _ => interpolated_text(ctx, p, line_end, "javascript"),
+        _ => interpolated_text(ctx, p, line_end, JS),
+    }
+}
+
+/// The inside of an inline tag: `#[strong.big(title="x") text]`.
+fn pug_inline(ctx: &mut Ctx, mut p: usize, end: usize) {
+    let src = ctx.src;
+    let mut selector = true;
+    while p < end {
+        let b = src[p];
+        if selector && b.is_ascii_alphabetic() {
+            let e = tag_name_end(ctx, p, end);
+            ctx.emit(p, e, Kind::Tag);
+            p = e;
+        } else if matches!(b, b'.' | b'#') && (is_ident_start(ctx.at(p + 1)) || ctx.at(p + 1) == b'-') {
+            let e = name_end(ctx, p + 1, b"-").min(end);
+            ctx.emit(p, e, Kind::Attribute);
+            p = e;
+        } else if b == b'(' {
+            let Some(close) = matching(src, p, end, true) else {
+                break;
+            };
+            attribute_list(ctx, p, close, JS);
+            p = close + 1;
+        } else {
+            break;
+        }
+        selector = false;
+    }
+    ctx.pos = ctx.pos.max(p);
+    let op = match ctx.at(p) {
+        b'=' => 1,
+        b'!' if ctx.at(p + 1) == b'=' => 2,
+        _ => 0,
+    };
+    if op > 0 && p < end {
+        ctx.emit(p, p + op, Kind::Punctuation);
+        ctx.embed(JS, p + op, end);
+    } else {
+        interpolated_text(ctx, p, end, JS);
     }
 }
 
@@ -3107,14 +3550,14 @@ fn haml_line(ctx: &mut Ctx, start: usize, end: usize) {
         return;
     }
     let rest = &src[at..line_end];
-    let ruby = lang("ruby");
+    let ruby = RUBY;
     match rest[0] {
         b'-' if rest.get(1) == Some(&b'#') => comment_block(ctx, at, end, ind),
         b'/' => comment_block(ctx, at, end, ind),
         b'!' if rest.starts_with(b"!!!") => ctx.emit(at, line_end, Kind::Meta),
         b'\\' => {
             ctx.emit(at, at + 1, Kind::Escape);
-            interpolated_text(ctx, at + 1, line_end, "ruby");
+            interpolated_text(ctx, at + 1, line_end, RUBY);
         }
         b'=' | b'~' | b'-' => {
             ctx.emit(at, at + 1, Kind::Punctuation);
@@ -3130,14 +3573,14 @@ fn haml_line(ctx: &mut Ctx, start: usize, end: usize) {
             filter_block(ctx, &src[at + 1..e], end, ind);
         }
         b'%' | b'.' | b'#' if is_ident_start(ctx.at(at + 1)) || ctx.at(at + 1) == b'-' => haml_tag(ctx, at, line_end),
-        _ => interpolated_text(ctx, at, line_end, "ruby"),
+        _ => interpolated_text(ctx, at, line_end, RUBY),
     }
 }
 
 /// `%tag.class#id{ruby: hash}(html="attrs")[obj]/<>= expr` and inline text.
 fn haml_tag(ctx: &mut Ctx, mut p: usize, mut line_end: usize) {
     let src = ctx.src;
-    let ruby = lang("ruby");
+    let ruby = RUBY;
     while p < line_end {
         match src[p] {
             b'%' => {
@@ -3154,7 +3597,7 @@ fn haml_tag(ctx: &mut Ctx, mut p: usize, mut line_end: usize) {
                 let close = matching(src, p, near(p, ctx.len()), true);
                 let stop = close.unwrap_or(line_end);
                 if src[p] == b'(' {
-                    attribute_list(ctx, p, stop, "ruby");
+                    attribute_list(ctx, p, stop, RUBY);
                 } else {
                     ctx.emit(p, p + 1, Kind::Punctuation);
                     ctx.embed(ruby, p + 1, stop);
@@ -3187,7 +3630,7 @@ fn haml_tag(ctx: &mut Ctx, mut p: usize, mut line_end: usize) {
         ctx.emit(p, p + op, Kind::Punctuation);
         ctx.embed(ruby, p + op, line_end);
     } else {
-        interpolated_text(ctx, p, line_end, "ruby");
+        interpolated_text(ctx, p, line_end, RUBY);
     }
 }
 
@@ -3206,13 +3649,13 @@ fn slim_line(ctx: &mut Ctx, start: usize, end: usize) {
         return;
     }
     let rest = &src[at..line_end];
-    let ruby = lang("ruby");
+    let ruby = RUBY;
     match rest[0] {
         b'/' => comment_block(ctx, at, end, ind),
         b'|' | b'\'' => {
             ctx.emit(at, at + 1, Kind::Punctuation);
             let block = indented_block(ctx, end, ind);
-            interpolated_text(ctx, at + 1, block, "ruby");
+            interpolated_text(ctx, at + 1, block, RUBY);
             ctx.pos = block;
         }
         b'-' | b'=' => {
@@ -3220,7 +3663,7 @@ fn slim_line(ctx: &mut Ctx, start: usize, end: usize) {
             ctx.emit(at, at + op, Kind::Punctuation);
             ctx.embed(ruby, at + op, line_end);
         }
-        b'<' => ctx.embed(lang("html"), at, line_end),
+        b'<' => ctx.embed(HTML, at, line_end),
         _ => {
             let w = name_end(ctx, at, b"-");
             let word = &src[at..w];
@@ -3233,7 +3676,7 @@ fn slim_line(ctx: &mut Ctx, start: usize, end: usize) {
             } else if w > at || matches!(rest[0], b'.' | b'#') {
                 slim_tag(ctx, at, line_end);
             } else {
-                interpolated_text(ctx, at, line_end, "ruby");
+                interpolated_text(ctx, at, line_end, RUBY);
             }
         }
     }
@@ -3242,7 +3685,7 @@ fn slim_line(ctx: &mut Ctx, start: usize, end: usize) {
 /// `a.btn#main href="x" title=title.upcase = expr` and inline text.
 fn slim_tag(ctx: &mut Ctx, mut p: usize, line_end: usize) {
     let src = ctx.src;
-    let ruby = lang("ruby");
+    let ruby = RUBY;
     let mut selector = true;
     while p < line_end {
         let b = src[p];
@@ -3285,7 +3728,7 @@ fn slim_tag(ctx: &mut Ctx, mut p: usize, line_end: usize) {
             ctx.embed(ruby, p + op, line_end);
         }
         b'/' if p + 1 == line_end => ctx.emit(p, p + 1, Kind::Punctuation),
-        _ => interpolated_text(ctx, p, line_end, "ruby"),
+        _ => interpolated_text(ctx, p, line_end, RUBY),
     }
 }
 
@@ -3302,11 +3745,7 @@ fn slim_attributes(ctx: &mut Ctx, mut p: usize, end: usize) -> usize {
         ctx.emit(e, e + 1, Kind::Operator);
         let v = e + 1;
         let stop = value_end(src, v, end, false);
-        if matches!(ctx.at(v), b'"' | b'\'') {
-            ctx.emit(v, stop, Kind::String);
-        } else {
-            ctx.embed(lang("ruby"), v, stop);
-        }
+        ctx.embed(RUBY, v, stop);
         p = stop;
     }
 }
@@ -3531,8 +3970,11 @@ fn texinfo_command(ctx: &mut Ctx) {
     }
     let e = name_end(ctx, start + 1, b"-");
     let name = &src[start + 1..e];
-    let line_end = start_of_cr(ctx, ctx.line_end(e));
+    // Only commands that take the rest of the line look for its end, so a long
+    // line of inline commands stays linear.
+    let line_end = |ctx: &Ctx| start_of_cr(ctx, ctx.line_end(e));
     if (name == b"c" || name == b"comment") && matches!(ctx.at(e), b' ' | b'\t' | b'\r' | b'\n' | 0) {
+        let line_end = line_end(ctx);
         ctx.pos = line_end;
         ctx.emit(start, line_end, Kind::Comment);
         return;
@@ -3564,14 +4006,16 @@ fn texinfo_command(ctx: &mut Ctx) {
         return;
     }
     ctx.emit(start, e, Kind::Keyword);
-    let args = ctx.skip_spaces_from(e).min(line_end);
+    // Spaces never run past the end of the line.
+    let args = ctx.skip_spaces_from(e);
     if TEXINFO_SECTIONS.contains(&name) {
+        let line_end = line_end(ctx);
         ctx.pos = line_end;
         ctx.emit(args, line_end, if name == b"node" { Kind::Link } else { Kind::Heading });
         return;
     }
     if name == b"end" {
-        let w = name_end(ctx, args, b"").min(line_end);
+        let w = name_end(ctx, args, b"");
         ctx.emit(args, w, Kind::Keyword);
         ctx.pos = w;
         return;
@@ -3588,6 +4032,7 @@ fn texinfo_command(ctx: &mut Ctx) {
         return;
     };
     // Find `@end name` on its own line.
+    let line_end = line_end(ctx);
     let mut close = ctx.len();
     let mut pos = line_end;
     while let Some(p) = ctx.find(pos, b"@end ") {
@@ -3601,8 +4046,8 @@ fn texinfo_command(ctx: &mut Ctx) {
     let body_start = (line_end + 1).min(close);
     match (kind, name) {
         (Kind::Comment, _) => ctx.emit(start, close, Kind::Comment),
-        (Kind::Text, b"tex") => ctx.embed(lang("latex"), body_start, close),
-        (Kind::Text, _) => ctx.embed(lang("html"), body_start, close),
+        (Kind::Text, b"tex") => ctx.embed(Language(&LATEX), body_start, close),
+        (Kind::Text, _) => ctx.embed(HTML, body_start, close),
         _ => ctx.emit(body_start, close, kind),
     }
     ctx.pos = close;
@@ -3648,7 +4093,7 @@ fn pod(ctx: &mut Ctx) {
                 }
                 p = i + 1;
             }
-            ctx.embed(lang("perl"), start, stop);
+            ctx.embed(PERL, start, stop);
             ctx.pos = stop;
             continue;
         }
@@ -3727,7 +4172,7 @@ fn pod_command(ctx: &mut Ctx, start: usize, end: usize, para_end: usize) -> bool
                 let body = (line_end + 1).min(close);
                 match format {
                     b"comment" => ctx.emit(body, close, Kind::Comment),
-                    b"html" => ctx.embed(lang("html"), body, close),
+                    b"html" => ctx.embed(HTML, body, close),
                     _ => ctx.emit(body, close, Kind::String),
                 }
                 ctx.pos = close;
@@ -3755,7 +4200,7 @@ fn pod_inline(ctx: &mut Ctx, start: usize, end: usize) {
             let closer = &b">>>>>>>>"[..angles.min(8)];
             let mut p = i + 1 + angles;
             let mut found = None;
-            while let Some(c) = find_in(ctx, p, end, closer) {
+            while let Some(c) = ctx.find_in(p, end, closer) {
                 if src[c - 1].is_ascii_whitespace() {
                     found = Some(c + angles);
                     break;

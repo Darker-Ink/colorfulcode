@@ -31,4 +31,8 @@
   \{{escaped}} stays literal
   {{^items}}Nothing here{{/items}}
   {{log "Rendered post" level="info"}}
+  {{=<% %>=}}
+  <p><% user.name %> sees <%! a comment %>custom delimiters, not {{this}}</p>
+  <%={{ }}=%>
+  {{#footer}}{{year}}{{/footer}}
 </div>
