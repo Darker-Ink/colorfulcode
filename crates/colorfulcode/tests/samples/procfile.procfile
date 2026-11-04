@@ -1,0 +1,6 @@
+# Process types
+web: bundle exec puma -C config/puma.rb -p ${PORT:-3000}
+worker: bundle exec sidekiq -q default -q mailers
+release: bin/rails db:migrate && echo "migrated"
+clock: bundle exec clockwork lib/clock.rb
+assets-watch: npm run watch -- --color

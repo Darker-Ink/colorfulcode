@@ -1,0 +1,46 @@
+{
+	email admin@example.com
+	admin off
+}
+
+(security) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Frame-Options DENY
+		-Server
+	}
+}
+
+# Main site
+example.com, www.example.com {
+	import security
+	root * /srv/www
+	encode zstd gzip
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy localhost:8080 localhost:8081 {
+			lb_policy round_robin
+			health_uri /healthz
+			health_interval 10s
+		}
+	}
+
+	@static {
+		path *.css *.js *.png
+	}
+	header @static Cache-Control "public, max-age={$CACHE_AGE}"
+
+	redir /old /new 301
+	respond /ping "pong from {host} at {time.now}" 200
+	log {
+		output file /var/log/caddy/access.log
+		format json
+	}
+	file_server
+}
+
+api.example.com {
+	reverse_proxy {$BACKEND:127.0.0.1:9000}
+	respond `{"status": "ok"}`
+}

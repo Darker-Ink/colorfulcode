@@ -1,0 +1,14 @@
+# Environment for every job
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+MAILTO="ops@example.com"
+
+# m  h  dom mon dow  command
+*/5  *  *   *   *    /usr/local/bin/healthcheck --quiet
+0    3  *   *   *    cd /srv/app && ./backup.sh > /var/log/backup.log 2>&1
+30   2  1   *   *    find /tmp -type f -mtime +7 -delete
+15   9  *   *   1-5  echo "standup in 15 minutes" | mail -s "reminder" "$USER"
+0    0  1   jan *    /usr/local/bin/rotate-keys --year "$(date +%Y)"
+0  */6  *   *   mon,thu  [ -x /opt/sync ] && /opt/sync --full
+@reboot              /usr/local/bin/start-agent
+@daily               apt-get update -qq

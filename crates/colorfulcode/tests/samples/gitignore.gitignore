@@ -1,0 +1,25 @@
+# Build output
+/target/
+/dist
+*.o
+*.so.[0-9]
+
+# Dependencies
+node_modules/
+**/vendor/**
+
+# Editors
+.idea/
+*.sw?
+*~
+.DS_Store
+
+# Environment, but keep the example
+.env*
+!.env.example
+
+# Literal names
+\#notes.txt
+\!important
+logs/**/*.log
+build-[a-z]*/
