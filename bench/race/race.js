@@ -17,8 +17,8 @@ document.getElementById("size").textContent = `${Math.round(code.length / 1000)}
 
 const racers = [
   { name: "colorfulcode", color: "linear-gradient(90deg, #ff5fa2, #ffc23d, #2fd9b5, #7b7cff)", run: () => highlight(code, "typescript") },
-  { name: "highlight.js", color: "#5c6370", run: () => hljs.highlight(code, { language: "typescript" }).value },
   { name: "Prism", color: "#5c6370", run: () => Prism.highlight(code, Prism.languages.typescript, "typescript") },
+  { name: "highlight.js", color: "#5c6370", run: () => hljs.highlight(code, { language: "typescript" }).value },
   { name: "Shiki", color: "#5c6370", run: () => shiki.codeToHtml(code, { lang: "typescript", theme: "github-dark" }) },
 ];
 
@@ -49,26 +49,33 @@ for (const r of racers) {
   lanes.append(r.el);
 }
 
-await new Promise((resolve) => setTimeout(resolve, 700));
-window.raceStart = Date.now();
-const start = performance.now();
-function frame(now) {
-  const elapsed = now - start;
+/** Draws the race as it looks `elapsed` milliseconds after the start. */
+function render(elapsed) {
   let running = false;
   for (const r of racers) {
-    const progress = Math.min(1, elapsed / r.ms);
+    const progress = Math.max(0, Math.min(1, elapsed / r.ms));
     r.el.querySelector(".bar").style.width = `${progress * 100}%`;
     const time = r.el.querySelector(".time");
-    if (progress < 1) {
+    const done = progress >= 1;
+    r.el.classList.toggle("done", done);
+    if (!done) {
       running = true;
-      time.textContent = `${Math.round(elapsed)} ms`;
-    } else if (!r.el.classList.contains("done")) {
-      r.el.classList.add("done");
+      time.textContent = `${Math.max(0, Math.round(elapsed))} ms`;
+    } else {
       const ratio = r.ms / fastest;
       time.innerHTML = ratio < 1.05 ? `${r.ms.toFixed(1)} ms` : `${Math.round(r.ms)} ms <span class="slower">${ratio.toFixed(0)}x slower</span>`;
     }
   }
-  if (running) requestAnimationFrame(frame);
-  else window.raceDone = true;
+  return running;
 }
-requestAnimationFrame(frame);
+
+render(0);
+// `?manual` leaves the clock to the caller (used to record frames).
+window.renderAt = render;
+window.raceReady = true;
+if (!new URLSearchParams(location.search).has("manual")) {
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  const start = performance.now();
+  const frame = (now) => render(now - start) && requestAnimationFrame(frame);
+  requestAnimationFrame(frame);
+}

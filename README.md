@@ -221,7 +221,7 @@ It covers JavaScript, TypeScript, JSX, TSX, HTML, CSS, SCSS, Less, Sass, JSON, M
 ## Benchmarks
 
 <p align="center">
-  <img src="assets/race.gif" alt="colorfulcode, highlight.js, Prism and Shiki highlighting the same 200 KB of TypeScript" width="760">
+  <img src="assets/race.webp" alt="colorfulcode, highlight.js, Prism and Shiki highlighting the same 200 KB of TypeScript" width="760">
 </p>
 
 The race above is measured in Chromium and replayed in real time (`cd bench && npm run race` runs it in your browser).
