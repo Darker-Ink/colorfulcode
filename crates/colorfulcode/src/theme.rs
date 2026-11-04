@@ -61,6 +61,25 @@ pub struct Style {
     pub underline: bool,
 }
 
+impl Style {
+    /// A plain style in `color`.
+    pub const fn new(color: Color) -> Style {
+        Style { color, bold: false, italic: false, underline: false }
+    }
+
+    pub const fn bold(self) -> Style {
+        Style { bold: true, ..self }
+    }
+
+    pub const fn italic(self) -> Style {
+        Style { italic: true, ..self }
+    }
+
+    pub const fn underline(self) -> Style {
+        Style { underline: true, ..self }
+    }
+}
+
 /// A color theme: a background, a foreground and a [`Style`] for every [`Kind`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Theme {
@@ -76,7 +95,39 @@ const I: u8 = 2;
 const U: u8 = 4;
 
 impl Theme {
-    /// Builds a theme. Kinds missing from `rules` inherit from [`Kind::fallback`].
+    /// Creates a custom theme. Kinds missing from `styles` inherit a sensible
+    /// style through [`Kind::fallback`], so a handful of entries is enough.
+    ///
+    /// ```
+    /// use colorfulcode::{Color, Kind, Style, Theme};
+    ///
+    /// let theme = Theme::new("mine", true, Color::hex("#1e1e1e"), Color::hex("#d4d4d4"), &[
+    ///     (Kind::Keyword, Style::new(Color::hex("#c586c0"))),
+    ///     (Kind::Comment, Style::new(Color::hex("#6a9955")).italic()),
+    /// ]);
+    /// // Tags borrow the keyword color.
+    /// assert_eq!(theme.style(Kind::Tag).color, Color::hex("#c586c0"));
+    /// ```
+    pub const fn new(
+        name: &'static str,
+        dark: bool,
+        background: Color,
+        foreground: Color,
+        styles: &[(Kind, Style)],
+    ) -> Theme {
+        let mut set = [false; Kind::COUNT];
+        let mut resolved = [Style::new(foreground); Kind::COUNT];
+        let mut i = 0;
+        while i < styles.len() {
+            let (kind, style) = styles[i];
+            resolved[kind as usize] = style;
+            set[kind as usize] = true;
+            i += 1;
+        }
+        Theme::resolve(name, dark, background, foreground, resolved, set)
+    }
+
+    /// Builds a built in theme from hex colors and `B`/`I`/`U` flags.
     const fn build(
         name: &'static str,
         dark: bool,
@@ -85,9 +136,8 @@ impl Theme {
         rules: &[(Kind, &str, u8)],
     ) -> Theme {
         let fg = Color::hex(foreground);
-        let plain = Style { color: fg, bold: false, italic: false, underline: false };
         let mut set = [false; Kind::COUNT];
-        let mut styles = [plain; Kind::COUNT];
+        let mut styles = [Style::new(fg); Kind::COUNT];
         let mut i = 0;
         while i < rules.len() {
             let (kind, color, flags) = rules[i];
@@ -100,7 +150,18 @@ impl Theme {
             set[kind as usize] = true;
             i += 1;
         }
-        // Resolve fallbacks for kinds the theme did not mention.
+        Theme::resolve(name, dark, Color::hex(background), fg, styles, set)
+    }
+
+    /// Fills in the kinds that were not `set` from their fallbacks.
+    const fn resolve(
+        name: &'static str,
+        dark: bool,
+        background: Color,
+        foreground: Color,
+        mut styles: [Style; Kind::COUNT],
+        set: [bool; Kind::COUNT],
+    ) -> Theme {
         let mut k = 0;
         while k < Kind::COUNT {
             if !set[k] {
@@ -122,7 +183,7 @@ impl Theme {
             }
             k += 1;
         }
-        Theme { name, dark, background: Color::hex(background), foreground: fg, styles }
+        Theme { name, dark, background, foreground, styles }
     }
 
     /// Style for a kind.

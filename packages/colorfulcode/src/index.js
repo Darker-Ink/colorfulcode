@@ -60,8 +60,22 @@ function resolveLanguage(name) {
   return index;
 }
 
+const definedThemes = new WeakMap();
+
+/** The name of a theme given by name or as an object (registered on first use). */
+function themeName(theme) {
+  if (typeof theme !== "object") return theme;
+  let name = definedThemes.get(theme);
+  if (name === undefined) {
+    name = defineTheme(theme);
+    definedThemes.set(theme, name);
+  }
+  return name;
+}
+
 function resolveTheme(theme) {
   if (theme === false || theme === null) return -1;
+  theme = themeName(theme);
   const index = meta().themeIndex.get(theme ?? "colorful");
   if (index === undefined) throw new Error(`colorfulcode: unknown theme "${theme}"`);
   return index;
@@ -144,8 +158,45 @@ export function getLanguage(name) {
   return index < 0 ? undefined : meta().languages[index];
 }
 
-/** Finds a theme by name. */
+/**
+ * Registers a custom theme and returns its name, which then works anywhere a
+ * built in theme name does. Kinds you leave out inherit a sensible style, so
+ * a handful of colors is enough:
+ *
+ *   defineTheme({
+ *     name: "discord",
+ *     background: "#2b2d31",
+ *     foreground: "#dbdee1",
+ *     styles: { keyword: "#ff7ab2", comment: { color: "#80848e", italic: true } },
+ *   });
+ */
+export function defineTheme(theme) {
+  const { name, dark, background, foreground, styles = {} } = theme;
+  if (!name || !background || !foreground) {
+    throw new Error("colorfulcode: a theme needs a name, a background and a foreground");
+  }
+  const lines = [name, (dark ?? isDark(background)) ? "dark" : "light", `${background} ${foreground}`];
+  for (const [kind, value] of Object.entries(styles)) {
+    const style = typeof value === "string" ? { color: value } : value;
+    const flags = (style.bold ? "b" : "") + (style.italic ? "i" : "") + (style.underline ? "u" : "");
+    lines.push(`${kind} ${style.color} ${flags}`);
+  }
+  if (instance().cc_theme_define(writeInput(lines.join("\n"))) < 0) {
+    throw new Error(`colorfulcode: invalid theme "${name}" (colors must be #rrggbb)`);
+  }
+  metadata = undefined; // Reload so listThemes() and getTheme() include it.
+  return name;
+}
+
+function isDark(hex) {
+  const n = parseInt(hex.replace("#", ""), 16);
+  const luma = 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
+  return luma < 128;
+}
+
+/** Finds a theme by name, or returns the colors of a theme object. */
 export function getTheme(name) {
+  if (name && typeof name === "object") name = themeName(name);
   const index = meta().themeIndex.get(name);
   return index === undefined ? undefined : meta().themes[index];
 }

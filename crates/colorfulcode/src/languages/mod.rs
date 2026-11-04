@@ -1,3 +1,6 @@
+// The trimmed build leaves the languages it does not register unused on purpose.
+#![cfg_attr(not(feature = "all-languages"), allow(dead_code))]
+
 //! Language definitions and lookup.
 
 use crate::lexer::generic::{Lexer, Spec};
@@ -204,6 +207,8 @@ mod registry {
     use super::*;
     use std::sync::OnceLock;
 
+    /// Every language.
+    #[cfg(feature = "all-languages")]
     static GROUPS: &[&[&Definition]] = &[
         c_family::LANGUAGES,
         data::LANGUAGES,
@@ -215,6 +220,67 @@ mod registry {
         shell::LANGUAGES,
         web::LANGUAGES,
     ];
+
+    /// The most used languages, for smaller builds. Everything else is removed
+    /// by the linker because nothing refers to it.
+    #[cfg(not(feature = "all-languages"))]
+    static GROUPS: &[&[&Definition]] = &[&[
+        &c_family::C,
+        &c_family::CPP,
+        &c_family::CSHARP,
+        &c_family::DART,
+        &c_family::GO,
+        &c_family::JAVA,
+        &c_family::KOTLIN,
+        &c_family::OBJECTIVE_C,
+        &c_family::RUST,
+        &c_family::SCALA,
+        &c_family::SWIFT,
+        &c_family::ZIG,
+        &data::DIFF,
+        &data::DOTENV,
+        &data::GRAPHQL,
+        &data::HCL,
+        &data::INI,
+        &data::PROTOBUF,
+        &data::SQL,
+        &data::TOML,
+        &data::YAML,
+        &functional::HASKELL,
+        &markup::ASTRO,
+        &markup::HTML,
+        &markup::MARKDOWN,
+        &markup::MDX,
+        &markup::PHP,
+        &markup::SVELTE,
+        &markup::SVG,
+        &markup::VUE,
+        &markup::XML,
+        &misc::PLAIN,
+        &scripting::ELIXIR,
+        &scripting::LUA,
+        &scripting::PERL,
+        &scripting::PYTHON,
+        &scripting::R,
+        &scripting::RUBY,
+        &shell::BASH,
+        &shell::BATCH,
+        &shell::DOCKERFILE,
+        &shell::MAKEFILE,
+        &shell::NGINX,
+        &shell::POWERSHELL,
+        &web::CSS,
+        &web::JAVASCRIPT,
+        &web::JSON,
+        &web::JSON5,
+        &web::JSONC,
+        &web::JSX,
+        &web::LESS,
+        &web::SASS,
+        &web::SCSS,
+        &web::TSX,
+        &web::TYPESCRIPT,
+    ]];
 
     pub fn all() -> &'static [Language] {
         static ALL: OnceLock<Vec<Language>> = OnceLock::new();

@@ -73,3 +73,26 @@ test("large input", () => {
   assert.ok(html.length > code.length);
   assert.equal(tokenize(code, "javascript").at(-1).end, code.length);
 });
+
+test("custom themes", async () => {
+  const { defineTheme } = await import("../dist/index.js");
+  const discord = {
+    name: "discord-test",
+    background: "#2b2d31",
+    foreground: "#dbdee1",
+    styles: { keyword: "#ff7ab2", comment: { color: "#80848e", italic: true } },
+  };
+  assert.equal(defineTheme(discord), "discord-test");
+  const html = highlight("let x = 1; // hi", "js", { theme: "discord-test" });
+  assert.match(html, /^<pre class="cc" style="background:#2b2d31;color:#dbdee1">/);
+  assert.ok(html.includes('<span style="color:#ff7ab2">let</span>'));
+  assert.ok(html.includes('<span style="color:#80848e;font-style:italic">// hi</span>'));
+  const info = getTheme("discord-test");
+  assert.equal(info.dark, true);
+  assert.equal(info.styles.tag.color, "#ff7ab2"); // tags fall back to keywords
+  // Objects work directly too.
+  const inline = { name: "inline-test", background: "#ffffff", foreground: "#111111", styles: { string: "#00aa00" } };
+  assert.ok(highlight("'a'", "js", { theme: inline }).includes("color:#00aa00"));
+  assert.equal(getTheme(inline).dark, false);
+  assert.throws(() => defineTheme({ name: "bad", background: "red", foreground: "#000000" }));
+});

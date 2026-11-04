@@ -9,4 +9,10 @@ rust-version.workspace = true
 keywords = ["syntax", "highlighting", "highlighter", "lexer", "wasm"]
 categories = ["text-processing", "parsing"]
 
+[features]
+default = ["all-languages"]
+# Every language. Without it only the most used ones are included, which
+# makes for a much smaller WebAssembly module.
+all-languages = []
+
 [dependencies]

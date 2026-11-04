@@ -11,5 +11,9 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["all-languages"]
+all-languages = ["colorfulcode/all-languages"]
+
 [dependencies]
-colorfulcode.workspace = true
+colorfulcode = { path = "../colorfulcode", default-features = false }

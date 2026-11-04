@@ -38,16 +38,30 @@ export interface Style {
 }
 
 export interface ThemeInfo {
-  name: ThemeName;
+  name: string;
   dark: boolean;
   background: string;
   foreground: string;
   styles: Record<Kind, Style>;
 }
 
+/** A custom theme. Kinds you leave out inherit a sensible style. */
+export interface ThemeDefinition {
+  name: string;
+  background: string;
+  foreground: string;
+  /** Defaults to a guess from the background brightness. */
+  dark?: boolean;
+  /** `"#rrggbb"` or a full style per kind. */
+  styles?: Partial<Record<Kind, string | { color: string; bold?: boolean; italic?: boolean; underline?: boolean }>>;
+}
+
 export interface HighlightOptions {
-  /** Theme for inline styles, or `false` for class names. Defaults to "colorful". */
-  theme?: ThemeName | false;
+  /**
+   * Theme for inline styles: a built in name, a name registered with
+   * `defineTheme`, or a theme object. `false` gives class names. Defaults to "colorful".
+   */
+  theme?: ThemeName | (string & {}) | ThemeDefinition | false;
   /** Wrap the output in `<pre class="cc"><code>`. Defaults to true. */
   pre?: boolean;
   /** Wrap every line in `<span class="cc-line">`. */
@@ -67,11 +81,13 @@ export function tokenizeLines(code: string, language: string): LineToken[][];
 export function listLanguages(): LanguageInfo[];
 export function listThemes(): ThemeInfo[];
 export function getLanguage(name: string): LanguageInfo | undefined;
-export function getTheme(name: string): ThemeInfo | undefined;
+export function getTheme(name: string | ThemeDefinition): ThemeInfo | undefined;
+/** Registers a custom theme and returns its name. */
+export function defineTheme(theme: ThemeDefinition): string;
 /** Guesses a language id from a file path and/or the code. */
 export function detectLanguage(input: { path?: string; code?: string }): string | undefined;
 /** CSS for the class based output, scoped to `selector` (default ".cc"). */
-export function themeCss(theme?: ThemeName, selector?: string): string;
+export function themeCss(theme?: ThemeName | (string & {}) | ThemeDefinition, selector?: string): string;
 /** Highlights every `code.language-xyz` element inside `root`. */
 export function highlightAll(options?: HighlightOptions, root?: ParentNode): void;
 export function highlightElement(element: Element, options?: HighlightOptions & { language?: string }): void;
