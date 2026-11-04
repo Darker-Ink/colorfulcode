@@ -395,7 +395,8 @@ fn pascal_member(lx: &mut Lexer, types: &[&str]) -> bool {
         b'=' if !matches!(ctx.at(i + 1), b'=' | b'>') => true,
         b'=' if ctx.at(i + 1) == b'>' => type_before(ctx, start, types),
         b'{' | b';' | b',' | b')' => type_before(ctx, start, types) || value_before(ctx, start),
-        b'.' | b'<' | b'[' | b'(' | b'?' => false,
+        b'?' => matches!(ctx.at(i + 1), b'?' | b'.'),
+        b'.' | b'<' | b'[' | b'(' => false,
         b if is_ident(b) => false,
         _ => value_before(ctx, start),
     };
