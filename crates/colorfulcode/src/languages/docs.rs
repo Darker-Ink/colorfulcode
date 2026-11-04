@@ -858,7 +858,11 @@ impl Tpl<'_, '_, '_> {
         if t.trim.contains(&self.ctx.at(inner)) {
             inner += 1;
         }
-        let close = find_in(self.ctx, inner, len, d.close).unwrap_or(len);
+        let close = match d.body {
+            Body::Comment => find_in(self.ctx, inner, len, d.close),
+            _ => tag_close(src, inner, d.close),
+        }
+        .unwrap_or(len);
         let mut inner_end = close;
         if inner_end > inner && t.trim.contains(&src[inner_end - 1]) {
             inner_end -= 1;
@@ -907,6 +911,30 @@ impl Tpl<'_, '_, '_> {
         ctx.pos = open;
         open
     }
+}
+
+/// Offset of the closing delimiter `close` at or after `from`, skipping quoted
+/// strings so that `{{ "}}" }}` stays one tag.
+fn tag_close(src: &[u8], from: usize, close: &[u8]) -> Option<usize> {
+    let mut i = from;
+    while i < src.len() {
+        let b = src[i];
+        if src[i..].starts_with(close) {
+            return Some(i);
+        }
+        if matches!(b, b'"' | b'\'' | b'`') {
+            let limit = near(i, src.len());
+            let mut j = i + 1;
+            while j < limit && src[j] != b && (b == b'`' || src[j] != b'\n') {
+                j += 1 + (src[j] == b'\\' && b != b'`') as usize;
+            }
+            if j < limit && src[j] == b {
+                i = j;
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Runs a template language over the whole input.
@@ -2033,15 +2061,7 @@ fn adoc_macro_text(src: &[u8], at: usize, end: usize) -> usize {
 // Org
 
 fn org(ctx: &mut Ctx) {
-    while !ctx.done() {
-        let start = ctx.pos;
-        let end = ctx.line_end(start);
-        org_line(ctx, start, end);
-        ctx.pos = ctx.pos.max(end);
-        if ctx.peek() == b'\n' {
-            ctx.pos += 1;
-        }
-    }
+    each_line(ctx, org_line);
 }
 
 const ORG_TODO: &[&[u8]] = &[b"TODO", b"DONE", b"NEXT", b"WAITING", b"HOLD", b"CANCELLED", b"CANCELED", b"STARTED"];
@@ -2634,15 +2654,7 @@ const GHERKIN_SECTIONS: &[&[u8]] = &[
 const GHERKIN_STEPS: &[&[u8]] = &[b"Given ", b"When ", b"Then ", b"And ", b"But ", b"* "];
 
 fn gherkin(ctx: &mut Ctx) {
-    while !ctx.done() {
-        let start = ctx.pos;
-        let end = ctx.line_end(start);
-        gherkin_line(ctx, start, end);
-        ctx.pos = ctx.pos.max(end);
-        if ctx.peek() == b'\n' {
-            ctx.pos += 1;
-        }
-    }
+    each_line(ctx, gherkin_line);
 }
 
 fn gherkin_line(ctx: &mut Ctx, start: usize, end: usize) {
@@ -3682,7 +3694,17 @@ fn pod_command(ctx: &mut Ctx, start: usize, end: usize, para_end: usize) -> bool
         b"head1" | b"head2" | b"head3" | b"head4" | b"head5" | b"head6" => ctx.emit(args, para_end, Kind::Heading),
         b"over" => ctx.emit(args, line_end, Kind::Number),
         b"encoding" => ctx.emit(args, line_end, Kind::String),
-        b"item" => pod_inline(ctx, args, para_end),
+        b"item" => {
+            // Bullets and numbers: `=item *` and `=item 2.`
+            let marker = src[args..line_end].iter().take_while(|b| b.is_ascii_digit()).count();
+            let marker = match ctx.at(args + marker) {
+                b'*' if marker == 0 && matches!(ctx.at(args + 1), b' ' | b'\t' | b'\r' | b'\n' | 0) => 1,
+                b'.' if marker > 0 => marker + 1,
+                _ => 0,
+            };
+            ctx.emit(args, args + marker, Kind::Keyword);
+            pod_inline(ctx, args + marker, para_end);
+        }
         b"for" | b"begin" | b"end" => {
             let f = name_end(ctx, args, b"-:").min(line_end);
             let format = &src[args..f];
