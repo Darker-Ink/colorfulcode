@@ -32,9 +32,14 @@ function writeInput(text) {
   return encoder.encodeInto(text, new Uint8Array(w.memory.buffer, ptr, capacity)).written;
 }
 
+// Node's Buffer decodes UTF-8 several times faster than its TextDecoder.
+const NodeBuffer = typeof Buffer === "function" && typeof Buffer.from === "function" ? Buffer : undefined;
+
 function readOutput(length) {
   const w = instance();
-  return decoder.decode(new Uint8Array(w.memory.buffer, w.cc_output_ptr(), length));
+  const ptr = w.cc_output_ptr();
+  if (NodeBuffer) return NodeBuffer.from(w.memory.buffer, ptr, length).toString("utf8");
+  return decoder.decode(new Uint8Array(w.memory.buffer, ptr, length));
 }
 
 function meta() {

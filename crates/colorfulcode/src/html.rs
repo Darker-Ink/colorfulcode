@@ -40,23 +40,22 @@ pub fn render(code: &str, tokens: &[Token], options: &Options) -> String {
         }
     }
     let gutter = if options.line_numbers { digits(code.bytes().filter(|&b| b == b'\n').count() + 1) } else { 0 };
-    let mut writer = Writer { out, theme: options.theme, highlight: options.highlight_lines, line: 1, lines, gutter };
+    let mut writer = Writer::new(out, options, lines, gutter);
     if lines {
         writer.open_line();
     }
     // Merge neighbors that render identically to keep the markup small.
     let mut i = 0;
     while i < tokens.len() {
-        let kind = tokens[i].kind;
+        let group = writer.group[tokens[i].kind as usize];
         let start = tokens[i].start as usize;
         let mut end = tokens[i].end as usize;
-        let key = writer.key(kind);
         i += 1;
-        while i < tokens.len() && writer.key(tokens[i].kind) == key {
+        while i < tokens.len() && writer.group[tokens[i].kind as usize] == group {
             end = tokens[i].end as usize;
             i += 1;
         }
-        writer.token(&code[start..end], kind);
+        writer.token(&code[start..end], group);
     }
     if lines {
         writer.out.push_str("</span>");
@@ -76,30 +75,50 @@ struct Writer<'a> {
     lines: bool,
     /// Width of the line number gutter in digits, or 0 for none.
     gutter: usize,
+    /// Kinds that render identically share a group; group 0 is plain text.
+    group: [u8; Kind::COUNT],
+    /// Opening tag for each group, built once per render.
+    open: Vec<String>,
 }
 
-/// What a kind renders as; equal keys can be merged.
-#[derive(PartialEq, Eq)]
-enum Key {
-    Plain,
-    Class(Kind),
-    Inline(Style),
-}
-
-impl Writer<'_> {
-    fn key(&self, kind: Kind) -> Key {
-        match self.theme {
-            Some(theme) => {
-                let style = theme.style(kind);
-                if style == theme.style(Kind::Text) {
-                    Key::Plain
-                } else {
-                    Key::Inline(style)
+impl<'a> Writer<'a> {
+    fn new(out: String, options: &Options<'a>, lines: bool, gutter: usize) -> Self {
+        let mut group = [0u8; Kind::COUNT];
+        let mut open = vec![String::new()];
+        let mut styles: Vec<Style> = Vec::new();
+        for kind in Kind::ALL.iter().copied().skip(1) {
+            match options.theme {
+                None => {
+                    group[kind as usize] = open.len() as u8;
+                    open.push(format!("<span class=\"{}\">", kind.class()));
+                }
+                Some(theme) => {
+                    let style = theme.style(kind);
+                    if style == theme.style(Kind::Text) {
+                        continue;
+                    }
+                    if let Some(i) = styles.iter().position(|s| *s == style) {
+                        group[kind as usize] = i as u8 + 1;
+                        continue;
+                    }
+                    styles.push(style);
+                    group[kind as usize] = open.len() as u8;
+                    let mut tag = format!("<span style=\"color:{}", style.color);
+                    if style.bold {
+                        tag.push_str(";font-weight:bold");
+                    }
+                    if style.italic {
+                        tag.push_str(";font-style:italic");
+                    }
+                    if style.underline {
+                        tag.push_str(";text-decoration:underline");
+                    }
+                    tag.push_str("\">");
+                    open.push(tag);
                 }
             }
-            None if kind == Kind::Text => Key::Plain,
-            None => Key::Class(kind),
         }
+        Writer { out, theme: options.theme, highlight: options.highlight_lines, line: 1, lines, gutter, group, open }
     }
 
     fn open_line(&mut self) {
@@ -127,50 +146,32 @@ impl Writer<'_> {
         }
     }
 
-    fn token(&mut self, text: &str, kind: Kind) {
+    fn token(&mut self, text: &str, group: u8) {
         if !self.lines {
-            self.span(text, kind);
+            self.span(text, group);
             return;
         }
         let mut rest = text;
         while let Some(nl) = rest.find('\n') {
-            self.span(&rest[..nl], kind);
+            self.span(&rest[..nl], group);
             self.out.push_str("</span>\n");
             self.line += 1;
             self.open_line();
             rest = &rest[nl + 1..];
         }
-        self.span(rest, kind);
+        self.span(rest, group);
     }
 
-    fn span(&mut self, text: &str, kind: Kind) {
+    fn span(&mut self, text: &str, group: u8) {
         if text.is_empty() {
             return;
         }
-        match self.key(kind) {
-            Key::Plain => escape_into(&mut self.out, text),
-            Key::Class(kind) => {
-                self.out.push_str("<span class=\"");
-                self.out.push_str(kind.class());
-                self.out.push_str("\">");
-                escape_into(&mut self.out, text);
-                self.out.push_str("</span>");
-            }
-            Key::Inline(style) => {
-                let _ = write!(self.out, "<span style=\"color:{}", style.color);
-                if style.bold {
-                    self.out.push_str(";font-weight:bold");
-                }
-                if style.italic {
-                    self.out.push_str(";font-style:italic");
-                }
-                if style.underline {
-                    self.out.push_str(";text-decoration:underline");
-                }
-                self.out.push_str("\">");
-                escape_into(&mut self.out, text);
-                self.out.push_str("</span>");
-            }
+        if group == 0 {
+            escape_into(&mut self.out, text);
+        } else {
+            self.out.push_str(&self.open[group as usize]);
+            escape_into(&mut self.out, text);
+            self.out.push_str("</span>");
         }
     }
 }
@@ -189,13 +190,16 @@ pub fn escape_into(out: &mut String, text: &str) {
     let bytes = text.as_bytes();
     let mut last = 0;
     for (i, &b) in bytes.iter().enumerate() {
+        // Most bytes are not special; one table lookup rejects them.
+        if !SPECIAL[b as usize] {
+            continue;
+        }
         let rep = match b {
             b'&' => "&amp;",
             b'<' => "&lt;",
             b'>' => "&gt;",
             b'"' => "&quot;",
-            b'\'' => "&#39;",
-            _ => continue,
+            _ => "&#39;",
         };
         out.push_str(&text[last..i]);
         out.push_str(rep);
@@ -203,6 +207,16 @@ pub fn escape_into(out: &mut String, text: &str) {
     }
     out.push_str(&text[last..]);
 }
+
+const SPECIAL: [bool; 256] = {
+    let mut t = [false; 256];
+    t[b'&' as usize] = true;
+    t[b'<' as usize] = true;
+    t[b'>' as usize] = true;
+    t[b'"' as usize] = true;
+    t[b'\'' as usize] = true;
+    t
+};
 
 /// Returns `text` with HTML special characters escaped.
 pub fn escape(text: &str) -> String {
