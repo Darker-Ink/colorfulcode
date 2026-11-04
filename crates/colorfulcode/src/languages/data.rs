@@ -1375,7 +1375,7 @@ pub static PRISMA: Definition =
 // HTTP
 
 pub static HTTP: Definition = Definition::new("http", "HTTP", Engine::Custom(http))
-    .aliases(&["https", "rest", "restclient"])
+    .aliases(&["https", "restclient"])
     .extensions(&["http", "rest"]);
 
 const HTTP_METHODS: &[&[u8]] =

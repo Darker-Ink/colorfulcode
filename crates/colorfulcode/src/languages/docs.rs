@@ -20,7 +20,7 @@ pub static BIBTEX: Definition =
 
 pub static RST: Definition = Definition::new("rst", "reStructuredText", Engine::Custom(rst))
     .aliases(&["restructuredtext", "rest"])
-    .extensions(&["rst", "rest"]);
+    .extensions(&["rst"]);
 
 pub static ASCIIDOC: Definition = Definition::new("asciidoc", "AsciiDoc", Engine::Custom(asciidoc))
     .aliases(&["adoc"])

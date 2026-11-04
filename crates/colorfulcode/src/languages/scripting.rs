@@ -921,7 +921,7 @@ static PERL_SPEC: Spec = Spec {
 
 pub static PERL: Definition = Definition::new("perl", "Perl", Engine::Generic(&PERL_SPEC))
     .aliases(&["pl", "perl5"])
-    .extensions(&["pl", "pm", "t", "psgi", "pod"])
+    .extensions(&["pl", "pm", "t", "psgi"])
     .filenames(&["cpanfile", ".perltidyrc"]);
 
 // Raku
