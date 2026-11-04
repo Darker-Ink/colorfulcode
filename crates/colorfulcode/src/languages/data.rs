@@ -33,6 +33,13 @@ fn line_comment(ctx: &mut Ctx) {
     ctx.emit_from(start, Kind::Comment);
 }
 
+/// Changes the kind of everything from `start` to the cursor.
+fn retag(ctx: &mut Ctx, start: usize, kind: Kind) {
+    let end = ctx.pos;
+    ctx.truncate_to(start);
+    ctx.emit(start, end, kind);
+}
+
 /// Lexes a string whose opening quote is at the cursor.
 fn quoted(ctx: &mut Ctx, kind: Kind, flags: u8) {
     let q = ctx.peek();
@@ -531,9 +538,7 @@ fn yaml_flow(ctx: &mut Ctx) {
             q @ (b'"' | b'\'') => {
                 quoted(ctx, Kind::String, if q == b'"' { ESC | MULTI } else { DOUBLED | MULTI });
                 if ctx.next_non_space(ctx.pos) == b':' {
-                    let end = ctx.pos;
-                    ctx.truncate_to(start);
-                    ctx.emit(start, end, Kind::Property);
+                    retag(ctx, start, Kind::Property);
                 }
             }
             b'&' | b'!' => yaml_properties(ctx),
@@ -942,8 +947,7 @@ fn columns(ctx: &mut Ctx, mut sep: u8) {
                 while !ctx.done() && !matches!(ctx.peek(), b'\n' | b'\r') && ctx.peek() != sep {
                     ctx.pos += 1;
                 }
-                ctx.truncate_to(start);
-                ctx.emit_from(start, COLUMN_KINDS[column % COLUMN_KINDS.len()]);
+                retag(ctx, start, COLUMN_KINDS[column % COLUMN_KINDS.len()]);
             }
         }
     }
@@ -1084,23 +1088,22 @@ const GRAPHQL_KEYWORDS: &[&str] = &[
 
 const GRAPHQL_TYPE_KEYWORDS: &[&str] = &["type", "interface", "union", "enum", "input", "scalar"];
 
-/// Lowercase names are fields (or arguments) unless they are keywords or
-/// calls. A name followed by `:` is always a field, even `type:`, and so is
-/// `type` in a selection set, where no type name follows it.
+/// Lowercase names in selection sets are fields unless they are keywords or
+/// calls; so is `type` when no type name follows it. Names followed by `:`
+/// are left to IDENT_KEYS.
 fn graphql_hook(lx: &mut Lexer) -> bool {
     let start = lx.ctx.pos;
     let end = lx.scan_ident(start);
-    let word = &lx.ctx.src[start..end];
     let next = lx.ctx.next_non_space(end);
-    if next != b':' {
-        let reserved = |list: &[&str]| list.iter().any(|w| w.as_bytes() == word);
-        if next == b'('
-            || reserved(GRAPHQL_KEYWORDS)
-            || (reserved(GRAPHQL_TYPE_KEYWORDS) && next.is_ascii_uppercase())
-            || reserved(&["true", "false", "null"])
-        {
-            return false;
-        }
+    if matches!(next, b':' | b'(') {
+        return false;
+    }
+    let word = &lx.ctx.src[start..end];
+    match lx.word_kind(word) {
+        None => {}
+        Some(Kind::Keyword)
+            if !next.is_ascii_uppercase() && GRAPHQL_TYPE_KEYWORDS.iter().any(|w| w.as_bytes() == word) => {}
+        Some(_) => return false,
     }
     lx.ctx.pos = end;
     lx.ctx.emit(start, end, Kind::Property);
@@ -1117,7 +1120,7 @@ static GRAPHQL_SPEC: Spec = Spec {
     type_keywords: GRAPHQL_TYPE_KEYWORDS,
     sigils: &[(b'$', Kind::Variable)],
     operators: "=!|&",
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | ANNOTATIONS,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | ANNOTATIONS | IDENT_KEYS,
     hook: Some(graphql_hook),
     hook_chars: "abcdefghijklmnopqrstuvwxyz_",
     ..Spec::DEFAULT
@@ -1187,22 +1190,6 @@ fn diff(ctx: &mut Ctx) {
 
 // Protocol Buffers
 
-/// `name =` is a field, option or enum value name.
-fn assignment_key_hook(lx: &mut Lexer) -> bool {
-    let start = lx.ctx.pos;
-    let end = lx.scan_ident(start);
-    let eq = lx.ctx.skip_spaces_from(end);
-    if lx.ctx.at(eq) != b'='
-        || matches!(lx.ctx.at(eq + 1), b'=' | b'>' | b'~')
-        || matches!(&lx.ctx.src[start..end], b"syntax" | b"edition")
-    {
-        return false;
-    }
-    lx.ctx.pos = end;
-    lx.ctx.emit(start, end, Kind::Property);
-    true
-}
-
 static PROTOBUF_SPEC: Spec = Spec {
     line_comments: &["//"],
     block_comments: &[("/*", "*/")],
@@ -1219,9 +1206,8 @@ static PROTOBUF_SPEC: Spec = Spec {
     function_keywords: &["rpc"],
     type_keywords: &["message", "enum", "service", "extend"],
     operators: "=-+<>",
-    features: CAPITALIZED_TYPES | UPPER_CONSTANTS,
-    hook: Some(assignment_key_hook),
-    hook_chars: "abcdefghijklmnopqrstuvwxyz_",
+    // Fields, enum values and options: `name = 1`; option message keys: `get: "/v1"`.
+    features: CAPITALIZED_TYPES | UPPER_CONSTANTS | ASSIGN_KEYS | IDENT_KEYS,
     ..Spec::DEFAULT
 };
 
@@ -1253,20 +1239,25 @@ pub static THRIFT: Definition =
 
 // HCL and Terraform
 
-/// Attribute and object keys (`name =`), nested block types at the start of
-/// a line (`lifecycle {`), and heredocs (`<<EOF`, `<<-EOF`).
+/// Words that start a line: attributes (`count = 2`, even when the word is
+/// in a word list) and nested block types (`lifecycle {`). Also heredocs
+/// (`<<EOF`, `<<-EOF`). Other `name =` keys come from ASSIGN_KEYS.
 fn hcl_hook(lx: &mut Lexer) -> bool {
     let start = lx.ctx.pos;
     if lx.ctx.peek() != b'<' {
-        if assignment_key_hook(lx) {
-            return true;
-        }
-        let end = lx.scan_ident(start);
-        if !lx.ctx.at_line_start(start) || !matches!(lx.ctx.next_non_space(end), b'{' | b'"') {
+        if !lx.ctx.at_line_start(start) {
             return false;
         }
+        let end = lx.scan_ident(start);
+        let after = lx.ctx.skip_spaces_from(end);
+        let kind = match lx.ctx.at(after) {
+            b'=' if !matches!(lx.ctx.at(after + 1), b'=' | b'>') => Kind::Property,
+            b'{' | b'"' => Kind::Keyword,
+            _ => return false,
+        };
         lx.ctx.pos = end;
-        lx.ctx.emit(start, end, Kind::Keyword);
+        lx.ctx.emit(start, end, kind);
+        lx.set_pending(None);
         return true;
     }
     let ctx = &mut *lx.ctx;
@@ -1320,7 +1311,7 @@ static HCL_SPEC: Spec = Spec {
     constants: &["true", "false", "null"],
     ident_chars: "-",
     operators: "+-*/%=&|!<>?:",
-    features: CALLS | MEMBERS,
+    features: CALLS | MEMBERS | ASSIGN_KEYS,
     hook: Some(hcl_hook),
     hook_chars: "<abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
     ..Spec::DEFAULT
@@ -1344,7 +1335,7 @@ fn prisma_hook(lx: &mut Lexer) -> bool {
     if end == lx.ctx.skip_spaces_from(end) || !is_ident_start(next) {
         return false;
     }
-    if matches!(&lx.ctx.src[start..end], b"model" | b"enum" | b"type" | b"view" | b"datasource" | b"generator") {
+    if lx.word_kind(&lx.ctx.src[start..end]).is_some() {
         return false;
     }
     lx.ctx.pos = end;
@@ -1540,9 +1531,10 @@ fn http_text(ctx: &mut Ctx, end: usize, kind: Kind) {
     ctx.pos = end;
 }
 
-/// Retags the identifier that ends at `end` as `kind`. Returns false if there
-/// is no identifier there.
-fn retag_word(lx: &mut Lexer, end: usize, kind: Kind) -> bool {
+/// Retags the identifier that ends at the cursor as `kind`. Returns false if
+/// there is no identifier there.
+fn retag_word(lx: &mut Lexer, kind: Kind) -> bool {
+    let end = lx.ctx.pos;
     let mut start = end;
     while start > 0 && lx.is_ident_byte(lx.ctx.src[start - 1]) {
         start -= 1;
@@ -1550,8 +1542,7 @@ fn retag_word(lx: &mut Lexer, end: usize, kind: Kind) -> bool {
     if start == end || lx.ctx.src[start].is_ascii_digit() {
         return false;
     }
-    lx.ctx.truncate_to(start);
-    lx.ctx.emit(start, end, kind);
+    lx.retag(start, kind);
     true
 }
 
@@ -1574,7 +1565,7 @@ fn cypher_hook(lx: &mut Lexer) -> bool {
         lx.mark_value();
         return true;
     }
-    if matches!(next, b' ' | b'\t') && retag_word(lx, start, Kind::Property) {
+    if matches!(next, b' ' | b'\t') && retag_word(lx, Kind::Property) {
         lx.ctx.token(1, Kind::Punctuation);
         lx.mark_operator();
         return true;
@@ -1634,24 +1625,31 @@ fn sparql_hook(lx: &mut Lexer) -> bool {
         lx.mark_value();
         return true;
     }
-    let name = |ctx: &Ctx, mut i: usize| {
-        while is_ident(ctx.at(i)) || ctx.at(i) == b'-' || (ctx.at(i) == b'.' && is_ident(ctx.at(i + 1))) {
-            i += 1;
-        }
-        i
-    };
-    let colon = name(ctx, start);
-    if ctx.at(colon) != b':' {
+    // The prefix before the colon was already lexed as words: take it back.
+    let mut prefix = start;
+    while prefix > 0 && (is_ident(ctx.src[prefix - 1]) || ctx.src[prefix - 1] == b'-') {
+        prefix -= 1;
+    }
+    while prefix < start && !is_ident_start(ctx.src[prefix]) {
+        prefix += 1;
+    }
+    if prefix > 0 && matches!(ctx.src[prefix - 1], b'?' | b'$' | b'@') {
         return false;
     }
-    let end = name(ctx, colon + 1);
-    if &ctx.src[start..colon] == b"_" {
-        ctx.emit(start, end, Kind::Variable);
-    } else {
-        ctx.emit(start, colon + 1, Kind::Type);
-        ctx.emit(colon + 1, end, Kind::Property);
+    let mut end = start + 1;
+    while is_ident(ctx.at(end)) || ctx.at(end) == b'-' || (ctx.at(end) == b'.' && is_ident(ctx.at(end + 1))) {
+        end += 1;
     }
-    ctx.pos = end;
+    if &ctx.src[prefix..start] == b"_" {
+        lx.retag(prefix, Kind::Variable);
+        lx.ctx.pos = end;
+        lx.ctx.emit(start, end, Kind::Variable);
+    } else {
+        lx.retag(prefix, Kind::Type);
+        lx.ctx.token(1, Kind::Type);
+        lx.ctx.emit(start + 1, end, Kind::Property);
+        lx.ctx.pos = end;
+    }
     lx.mark_value();
     true
 }
@@ -1677,7 +1675,7 @@ static SPARQL_SPEC: Spec = Spec {
     case_insensitive: true,
     features: CALLS,
     hook: Some(sparql_hook),
-    hook_chars: "<:_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    hook_chars: "<:",
     ..Spec::DEFAULT
 };
 
@@ -1818,9 +1816,7 @@ fn kdl_retag(ctx: &mut Ctx, start: usize, node: bool) {
     } else {
         return;
     };
-    let end = ctx.pos;
-    ctx.truncate_to(start);
-    ctx.emit(start, end, kind);
+    retag(ctx, start, kind);
 }
 
 /// `/-` comments out the next node, argument, property or children block.
@@ -1928,7 +1924,7 @@ fn jsonnet_hook(lx: &mut Lexer) -> bool {
                 end += 1;
             }
             let colons = end - start - plus;
-            if colons == 0 || (colons == 1 && plus == 0) || !retag_word(lx, start, Kind::Property) {
+            if colons == 0 || (colons == 1 && plus == 0) || !retag_word(lx, Kind::Property) {
                 return false;
             }
             lx.ctx.pos = end;
@@ -1998,21 +1994,27 @@ fn dot_hook(lx: &mut Lexer) -> bool {
             true
         }
         _ => {
-            let end = lx.scan_ident(start);
-            let eq = lx.ctx.skip_spaces_from(end);
-            if lx.ctx.at(eq) != b'=' {
-                return false;
+            // `shape = box`: the word before `=` is the attribute, a bare word after it the value.
+            let mut key_end = start;
+            while key_end > 0 && matches!(lx.ctx.src[key_end - 1], b' ' | b'\t') {
+                key_end -= 1;
             }
-            lx.ctx.emit(start, end, Kind::Attribute);
-            lx.ctx.emit(eq, eq + 1, Kind::Operator);
-            let value = lx.ctx.skip_spaces_from(eq + 1);
+            let mut key = key_end;
+            while key > 0 && is_ident(lx.ctx.src[key - 1]) {
+                key -= 1;
+            }
+            if key < key_end && is_ident_start(lx.ctx.src[key]) {
+                lx.ctx.truncate_to(key);
+                lx.ctx.emit(key, key_end, Kind::Attribute);
+            }
+            lx.ctx.token(1, Kind::Operator);
+            let value = lx.ctx.skip_spaces_from(start + 1);
             if is_ident_start(lx.ctx.at(value)) {
                 let value_end = lx.scan_ident(value);
                 lx.ctx.emit(value, value_end, Kind::String);
                 lx.ctx.pos = value_end;
                 lx.mark_value();
             } else {
-                lx.ctx.pos = eq + 1;
                 lx.mark_operator();
             }
             true
@@ -2029,7 +2031,7 @@ static DOT_SPEC: Spec = Spec {
     operators: "-=>",
     case_insensitive: true,
     hook: Some(dot_hook),
-    hook_chars: "#<abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
+    hook_chars: "#<=",
     ..Spec::DEFAULT
 };
 
