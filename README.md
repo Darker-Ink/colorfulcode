@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Live highlighting while typing in the React playground" width="860">
+  <img src="assets/demo.webp" alt="Live highlighting while typing in the React playground" width="860">
 </p>
 
 ## Why
