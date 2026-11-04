@@ -150,11 +150,32 @@ fn typst_markup_and_code() {
             ("width", Property),
             ("2cm", Number),
             ("Box", Text),
-            ("$a^2$", String),
+            ("$a", String),
+            ("^", Operator),
+            ("2", Number),
+            ("$", String),
             ("@ref", Constant),
         ],
     );
     assert_not("typst", "a snake_case_name here", "_case_", Emphasis);
+    let code = r#"$ sqrt(x) + alpha.alt dot 2.5 \$ "text $" #f(1) $ after"#;
+    assert_tokens(
+        "typst",
+        code,
+        &[
+            ("sqrt", Function),
+            ("+", Operator),
+            ("alpha.alt", Constant),
+            ("2.5", Number),
+            ("\\$", Escape),
+            ("\"text $\"", String),
+            ("#f", Function),
+            ("$", String),
+            ("after", Text),
+        ],
+    );
+    // Code mode math.
+    assert_tokens("typst", "#let e = $m c^2$", &[("#let", Keyword), ("$m", String), ("^", Operator)]);
 }
 
 #[test]

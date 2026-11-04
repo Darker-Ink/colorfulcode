@@ -2508,14 +2508,7 @@ fn typst_markup(ctx: &mut Ctx, nested: bool) {
                 None => ctx.pos += 1,
             },
             b'`' => typst_raw(ctx),
-            b'$' => {
-                let mut e = i + 1;
-                while e < src.len() && src[e] != b'$' {
-                    e += 1 + (src[e] == b'\\') as usize;
-                }
-                ctx.pos = (e + 1).min(src.len());
-                ctx.emit(i, ctx.pos, Kind::String);
-            }
+            b'$' => typst_math(ctx),
             b'#' => typst_hash(ctx),
             b'<' if is_ident_start(next) => {
                 let e = name_end(ctx, i + 1, b"-.:");
@@ -2547,6 +2540,89 @@ fn typst_markup(ctx: &mut Ctx, nested: bool) {
                 ctx.pos = i + 1 + skip;
             }
         }
+    }
+}
+
+/// Math between `$` signs. Like LaTeX math, plain content is a string, with
+/// numbers, operators, `name(...)` calls and named symbols (`alpha`, `arrow.r`)
+/// picked out.
+fn typst_math(ctx: &mut Ctx) {
+    let src = ctx.src;
+    let start = ctx.pos;
+    let mut close = start + 1;
+    while close < src.len() && src[close] != b'$' {
+        match src[close] {
+            b'\\' => close += 1,
+            b'"' => close += 1 + src[close + 1..].iter().position(|&b| b == b'"').unwrap_or(src.len()),
+            _ => {}
+        }
+        close += 1;
+    }
+    let close = close.min(src.len());
+    ctx.token(1, Kind::String);
+    while ctx.pos < close {
+        let i = ctx.pos;
+        let b = src[i];
+        match b {
+            b' ' | b'\t' | b'\r' | b'\n' => ctx.pos += 1,
+            b'\\' => {
+                ctx.pos = (i + 1).min(close);
+                if ctx.pos < close {
+                    ctx.bump_char();
+                }
+                ctx.emit(i, ctx.pos, Kind::Escape);
+            }
+            b'"' => {
+                let e = src[i + 1..close].iter().position(|&b| b == b'"').map_or(close, |k| i + k + 2);
+                ctx.pos = e;
+                ctx.emit(i, e, Kind::String);
+            }
+            b'#' => {
+                typst_hash(ctx);
+                ctx.pos = ctx.pos.max(i + 1);
+            }
+            b'0'..=b'9' => {
+                let mut e = i;
+                while e < close && (src[e].is_ascii_digit() || (src[e] == b'.' && ctx.at(e + 1).is_ascii_digit())) {
+                    e += 1;
+                }
+                ctx.pos = e;
+                ctx.emit(i, e, Kind::Number);
+            }
+            b'+' | b'-' | b'*' | b'/' | b'=' | b'<' | b'>' | b'!' | b'^' | b'_' | b'|' | b'~' | b'\'' | b':' => {
+                ctx.token(1, Kind::Operator)
+            }
+            b'&' | b',' | b';' | b'(' | b')' | b'[' | b']' | b'{' | b'}' => ctx.token(1, Kind::Punctuation),
+            _ if b.is_ascii_alphabetic() => {
+                let mut e = i;
+                while e < close && src[e].is_ascii_alphabetic() {
+                    e += 1;
+                }
+                if e - i == 1 {
+                    // A single letter is a variable: `x`, `y`.
+                    ctx.pos = e;
+                    ctx.emit(i, e, Kind::String);
+                    continue;
+                }
+                while ctx.at(e) == b'.' && ctx.at(e + 1).is_ascii_alphabetic() && e + 1 < close {
+                    e += 1;
+                    while e < close && src[e].is_ascii_alphabetic() {
+                        e += 1;
+                    }
+                }
+                ctx.pos = e;
+                ctx.emit(i, e, if ctx.at(e) == b'(' { Kind::Function } else { Kind::Constant });
+            }
+            _ => {
+                ctx.bump_char();
+                ctx.pos = ctx.pos.min(close);
+                ctx.emit(i, ctx.pos, Kind::String);
+            }
+        }
+    }
+    ctx.pos = ctx.pos.max(close);
+    if ctx.at(close) == b'$' {
+        ctx.token(1, Kind::String);
     }
 }
 
@@ -2713,10 +2789,7 @@ fn typst_hook(lx: &mut Lexer) -> bool {
             true
         }
         b'$' => {
-            let start = ctx.pos;
-            let close = ctx.src[start + 1..].iter().position(|&b| b == b'$').map_or(ctx.len(), |i| start + i + 2);
-            ctx.pos = close;
-            ctx.emit(start, close, Kind::String);
+            typst_math(ctx);
             lx.mark_value();
             true
         }
