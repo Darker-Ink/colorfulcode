@@ -1,0 +1,31 @@
+// Optional themes. Each one is a plain theme object you can pass as `theme`.
+import type { ThemeDefinition } from "./index.js";
+
+export declare const rosePine: ThemeDefinition;
+export declare const rosePineMoon: ThemeDefinition;
+export declare const rosePineDawn: ThemeDefinition;
+export declare const ayuDark: ThemeDefinition;
+export declare const ayuMirage: ThemeDefinition;
+export declare const ayuLight: ThemeDefinition;
+export declare const nightOwl: ThemeDefinition;
+export declare const lightOwl: ThemeDefinition;
+export declare const palenight: ThemeDefinition;
+export declare const materialDarker: ThemeDefinition;
+export declare const synthwave84: ThemeDefinition;
+export declare const kanagawa: ThemeDefinition;
+export declare const everforestDark: ThemeDefinition;
+export declare const everforestLight: ThemeDefinition;
+export declare const vitesseDark: ThemeDefinition;
+export declare const vitesseLight: ThemeDefinition;
+export declare const poimandres: ThemeDefinition;
+export declare const githubDarkDimmed: ThemeDefinition;
+export declare const oneLight: ThemeDefinition;
+export declare const gruvboxLight: ThemeDefinition;
+export declare const catppuccinFrappe: ThemeDefinition;
+export declare const catppuccinMacchiato: ThemeDefinition;
+export declare const tokyoNightStorm: ThemeDefinition;
+export declare const tokyoNightLight: ThemeDefinition;
+export declare const monokaiPro: ThemeDefinition;
+export declare const horizon: ThemeDefinition;
+export declare const panda: ThemeDefinition;
+export declare const cobalt2: ThemeDefinition;

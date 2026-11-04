@@ -39,6 +39,10 @@
       "types": "./dist/common-react.d.ts",
       "default": "./dist/common-react.js"
     },
+    "./themes": {
+      "types": "./dist/themes.d.ts",
+      "default": "./dist/themes.js"
+    },
     "./styles.css": "./dist/styles.css",
     "./css/*": "./dist/css/*"
   },
