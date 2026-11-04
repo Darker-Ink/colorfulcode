@@ -37,11 +37,13 @@ pub enum Kind {
     Link,
     Inserted,
     Deleted,
+    /// Parameter names where a function is defined.
+    Parameter,
 }
 
 impl Kind {
     /// Number of kinds. Useful for building lookup tables indexed by `kind as usize`.
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 25;
 
     /// Every kind, ordered by its numeric value.
     pub const ALL: [Kind; Kind::COUNT] = [
@@ -69,6 +71,7 @@ impl Kind {
         Kind::Link,
         Kind::Inserted,
         Kind::Deleted,
+        Kind::Parameter,
     ];
 
     /// Lowercase name of the kind, for example `"keyword"`.
@@ -98,6 +101,7 @@ impl Kind {
             Kind::Link => "link",
             Kind::Inserted => "inserted",
             Kind::Deleted => "deleted",
+            Kind::Parameter => "parameter",
         }
     }
 
@@ -128,6 +132,7 @@ impl Kind {
             Kind::Link => "cc-link",
             Kind::Inserted => "cc-inserted",
             Kind::Deleted => "cc-deleted",
+            Kind::Parameter => "cc-parameter",
         }
     }
 
@@ -147,6 +152,7 @@ impl Kind {
             Kind::Link => Some(Kind::String),
             Kind::Inserted => Some(Kind::String),
             Kind::Deleted => Some(Kind::Keyword),
+            Kind::Parameter => Some(Kind::Variable),
             Kind::Punctuation => Some(Kind::Operator),
             _ => Some(Kind::Text),
         }

@@ -62,7 +62,8 @@ enum {
     CC_KIND_LINK = 21,
     CC_KIND_INSERTED = 22,
     CC_KIND_DELETED = 23,
-    CC_KIND_COUNT = 24
+    CC_KIND_PARAMETER = 24,
+    CC_KIND_COUNT = 25
 };
 
 /* A highlighted span of the input, [start, end). Offsets are UTF-8 bytes, or

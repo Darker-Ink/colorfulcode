@@ -2,7 +2,8 @@
 export type Kind =
   | "text" | "comment" | "keyword" | "string" | "escape" | "number" | "constant" | "function" | "type"
   | "variable" | "property" | "builtin" | "operator" | "punctuation" | "tag" | "attribute" | "meta"
-  | "regex" | "heading" | "emphasis" | "strong" | "link" | "inserted" | "deleted";
+  | "regex" | "heading" | "emphasis" | "strong" | "link" | "inserted" | "deleted"
+  | "parameter";
 
 export type ThemeName =
   | "colorful" | "colorful-light" | "github-dark" | "github-light" | "dracula" | "nord" | "one-dark"
