@@ -1,7 +1,25 @@
-import { Code, getTheme, highlight, listLanguages, listThemes } from "colorfulcode/react";
+import { Code, defineTheme, getTheme, highlight, listLanguages, listThemes } from "colorfulcode/react";
 import { useMemo, useState } from "react";
 import { Editor } from "./Editor.jsx";
 import { samples } from "./samples.js";
+
+// A custom theme, defined at runtime. See the README for how it works.
+defineTheme({
+  name: "discord",
+  background: "#2b2d31",
+  foreground: "#dbdee1",
+  styles: {
+    comment: { color: "#80848e", italic: true },
+    keyword: "#eb459e",
+    string: "#57f287",
+    number: "#f0b232",
+    function: "#00a8fc",
+    type: "#fee75c",
+    property: "#c9cdfb",
+    operator: "#949cf7",
+    punctuation: "#b5bac1",
+  },
+});
 
 const languages = listLanguages().filter((l) => samples[l.id] !== undefined);
 const themes = listThemes();
@@ -45,7 +63,7 @@ export default function App() {
           ))}
         </h1>
         <p className="tagline">
-          {listLanguages().length} languages, {themes.length} themes, written in Rust, running as WebAssembly.
+          {listLanguages().length} languages, {themes.length - 1} themes, written in Rust, running as WebAssembly.
         </p>
       </header>
 
@@ -62,7 +80,9 @@ export default function App() {
           Theme
           <select value={theme} onChange={(e) => setTheme(e.target.value)}>
             {themes.map((t) => (
-              <option key={t.name} value={t.name}>{t.name}</option>
+              <option key={t.name} value={t.name}>
+                {t.name === "discord" ? "discord (custom)" : t.name}
+              </option>
             ))}
           </select>
         </label>

@@ -158,6 +158,66 @@ With `theme: false` each token gets the class `cc-<kind>`, for example `cc-keywo
 
 `colorful` (default), `colorful-light`, `github-dark`, `github-light`, `dracula`, `nord`, `one-dark`, `monokai`, `catppuccin-mocha`, `catppuccin-latte`, `tokyo-night`, `gruvbox-dark`, `solarized-dark`, `solarized-light`.
 
+## Custom themes
+
+A theme is a background, a foreground and colors for the [kinds](#token-kinds) you care about. Anything you leave out inherits something sensible: `tag` and `meta` borrow the `keyword` color, `builtin` borrows `function`, `escape` borrows `constant`, and so on.
+
+Here is a theme in Discord's colors, something that will never ship built in:
+
+```js
+import { defineTheme, highlight } from "colorfulcode";
+
+defineTheme({
+  name: "discord",
+  background: "#2b2d31",
+  foreground: "#dbdee1",
+  styles: {
+    comment: { color: "#80848e", italic: true },
+    keyword: "#eb459e",
+    string: "#57f287",
+    number: "#f0b232",
+    function: "#00a8fc",
+    type: "#fee75c",
+    property: "#c9cdfb",
+    operator: "#949cf7",
+    punctuation: "#b5bac1",
+  },
+});
+
+highlight(code, "ts", { theme: "discord" });
+```
+
+In React, pass the object straight to `theme` and it is registered on first use:
+
+```tsx
+<Code code={source} language="ts" theme={discord} />
+```
+
+In Rust, build one with `Theme::new`:
+
+```rust
+use colorfulcode::{Color, Kind, Style, Theme};
+
+static DISCORD: Theme = Theme::new("discord", true, Color::hex("#2b2d31"), Color::hex("#dbdee1"), &[
+    (Kind::Comment, Style::new(Color::hex("#80848e")).italic()),
+    (Kind::Keyword, Style::new(Color::hex("#eb459e"))),
+    (Kind::String, Style::new(Color::hex("#57f287"))),
+]);
+```
+
+Native apps usually skip themes altogether and map each kind to colors from their own design system.
+
+## Smaller build
+
+`colorfulcode` includes every language (__WASM__ KiB, __GZIP__ KiB gzipped). If you only need the popular ones, `colorfulcode/common` has __COMMON_LANGS__ of them (__COMMON_WASM__ KiB, __COMMON_GZIP__ KiB gzipped) with the same API:
+
+```js
+import { highlight } from "colorfulcode/common";
+import { Code } from "colorfulcode/common/react";
+```
+
+It covers JavaScript, TypeScript, JSX, TSX, HTML, CSS, SCSS, Less, Sass, JSON, Markdown, MDX, Vue, Svelte, Astro, Python, Rust, Go, Java, Kotlin, Swift, C, C++, C#, Objective-C, Dart, Scala, Zig, Haskell, Elixir, Ruby, PHP, Perl, Lua, R, Bash, PowerShell, Batch, Dockerfile, Makefile, nginx, SQL, GraphQL, YAML, TOML, INI, dotenv, HCL, Protobuf, XML, SVG, diff and plain text. In Rust the same set is what you get with `default-features = false`.
+
 ## Benchmarks
 
 HTML output for about 100 KB of code per language, measured in Node 22 (`bench/compare.mjs`):
