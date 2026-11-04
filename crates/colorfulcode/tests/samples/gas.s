@@ -31,3 +31,5 @@ factorial:
 counter = 10
     movq    $counter, %rcx
     leaq    .LC0(%rip), %rdi
+1:  decl    %ecx
+    jnz     1b

@@ -471,3 +471,111 @@ fn small_dsls() {
         ],
     );
 }
+
+#[test]
+fn gnu_numeric_labels_and_symbol_immediates() {
+    assert_tokens(
+        "gas",
+        "1:  decl %ecx\n    jnz 1b\n    movl $msg, %eax",
+        &[("1", Function), ("decl", Keyword), ("1b", Text), ("$msg", Constant), ("%eax", Variable)],
+    );
+    assert_tokens(
+        "riscv",
+        "2:\n    j 2b\n    li a0, 2",
+        &[("2", Function), ("2b", Text), ("a0", Variable), ("2", Number)],
+    );
+    assert_not("gas", "    movl -4(%rbp), %eax", "4", Function);
+    assert_tokens("asm", "    mov ax, [rsp+r8]", &[("ax", Variable), ("rsp", Variable), ("r8", Variable)]);
+}
+
+#[test]
+fn fortran_fixed_form_comments() {
+    let code = "C     Compute the sum\nc-----\n*     note\n      X = 1";
+    assert_tokens(
+        "fortran",
+        code,
+        &[("C     Compute the sum", Comment), ("c-----", Comment), ("*     note", Comment), ("1", Number)],
+    );
+    assert_not("fortran", "c = 2\nc(1) = 3\nc%x = 1\ncontains", "c", Comment);
+    assert_tokens("fortran", "call foo(c)\ncontains", &[("call", Keyword), ("contains", Keyword)]);
+}
+
+#[test]
+fn matlab_command_syntax_and_signatures() {
+    assert_tokens(
+        "matlab",
+        "clc; close all\nhold on\nformat long g % c",
+        &[
+            ("clc", Builtin),
+            ("close", Builtin),
+            ("all", String),
+            ("hold", Builtin),
+            ("on", String),
+            ("format", Builtin),
+            ("long g", String),
+            ("% c", Comment),
+        ],
+    );
+    assert_not("matlab", "hold(ax, 'on')\nfigure = 3;", "on", String);
+    assert_tokens("matlab", "clear - 1", &[("-", Operator), ("1", Number)]);
+    assert_tokens(
+        "matlab",
+        "function [a, b] = stats(x)\nfunction out = get.Name(obj)\nfunction run",
+        &[("a", Text), ("stats", Function), ("out", Text), ("get.Name", Function), ("run", Function)],
+    );
+}
+
+#[test]
+fn macro_references_in_strings() {
+    assert_tokens(
+        "sas",
+        "title \"&title for &&year&i.\" 'not &this';\n%macro report(x);\n%let data = 1;",
+        &[
+            ("&title", Variable),
+            (" for ", String),
+            ("&&year&i.", Variable),
+            ("'not &this'", String),
+            ("%macro", Keyword),
+            ("report", Function),
+            ("data", Variable),
+        ],
+    );
+    assert_tokens(
+        "stata",
+        "display \"`g' and $path and ${dir}\"\ndi `\"say \"`x'\"\"'",
+        &[("`g'", Variable), ("$path", Variable), ("${dir}", Variable), ("`x'", Variable)],
+    );
+}
+
+#[test]
+fn vbnet_and_vba_keywords() {
+    assert_tokens("vbnet", "Try\nCatch ex As Exception\nEnd Try", &[("Try", Keyword), ("Catch", Keyword)]);
+    assert_not("vbnet", "Wend", "Wend", Keyword);
+    assert_tokens(
+        "vba",
+        "While x\nWend\nType Point\nEnd Type",
+        &[("Wend", Keyword), ("Type", Keyword), ("Point", Type)],
+    );
+    assert_not("vba", "x = a AndAlso b", "AndAlso", Keyword);
+    assert_not("vba", "Try", "Try", Keyword);
+}
+
+#[test]
+fn forth_definitions_and_wolfram_named_characters() {
+    assert_tokens(
+        "forth",
+        "variable count 10 constant ten create buf",
+        &[("count", Variable), ("10", Number), ("ten", Variable), ("buf", Variable)],
+    );
+    assert_tokens(
+        "wolfram",
+        "f[\\[Alpha]_] := \\[Alpha] \\[Rule] \\[Pi]; s = \"\\[Beta] \\n\"",
+        &[
+            ("\\[Alpha]_", Variable),
+            ("\\[Rule]", Operator),
+            ("\\[Pi]", Constant),
+            ("\\[Beta]", Escape),
+            ("\\n", Escape),
+        ],
+    );
+}

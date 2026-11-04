@@ -59,9 +59,53 @@ fn word_before<'s>(ctx: &Ctx<'s, '_>, pos: usize) -> &'s [u8] {
     &src[start..end]
 }
 
+/// The byte before `pos` on its line, skipping spaces and tabs (`0` at the start of input).
+fn byte_before(ctx: &Ctx, pos: usize) -> u8 {
+    let mut i = pos;
+    while i > 0 && matches!(ctx.src[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    if i == 0 {
+        0
+    } else {
+        ctx.src[i - 1]
+    }
+}
+
 /// Whether only spaces remain on the line after `pos`.
 fn rest_blank(ctx: &Ctx, pos: usize) -> bool {
     matches!(ctx.at(ctx.skip_spaces_from(pos)), b'\n' | b'\r' | 0)
+}
+
+/// A single line string from `start` (with an opening delimiter `open_len` bytes
+/// long) to `close`, in which `refs` finds macro references (it returns their end).
+/// A doubled `close` is an escaped delimiter.
+fn string_with_refs(ctx: &mut Ctx, start: usize, open_len: usize, close: &[u8], refs: fn(&Ctx, usize) -> usize) {
+    let mut i = (start + open_len).min(ctx.len());
+    let mut seg = start;
+    while i < ctx.len() && ctx.src[i] != b'\n' {
+        if ctx.src[i..].starts_with(close) {
+            if close.len() == 1 && ctx.at(i + 1) == close[0] {
+                i += 2;
+                continue;
+            }
+            i += close.len();
+            ctx.emit(seg, i, Kind::String);
+            ctx.pos = i;
+            return;
+        }
+        let end = refs(ctx, i);
+        if end > i {
+            ctx.emit(seg, i, Kind::String);
+            ctx.emit(i, end, Kind::Variable);
+            seg = end;
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    ctx.emit(seg, i, Kind::String);
+    ctx.pos = i;
 }
 
 /// A double quoted string with `\XX` hex, `\u{...}` and single character escapes.
@@ -131,39 +175,45 @@ fn indexed(word: &[u8], prefix: &str, max: u32) -> bool {
         && word[p..].iter().fold(0, |n, d| n * 10 + u32::from(d - b'0')) <= max
 }
 
-fn x86_register(w: &[u8]) -> bool {
-    const NAMED: &[&str] = &[
-        "al", "ah", "ax", "eax", "rax", "bl", "bh", "bx", "ebx", "rbx", "cl", "ch", "cx", "ecx", "rcx", "dl", "dh",
-        "dx", "edx", "rdx", "si", "esi", "rsi", "sil", "di", "edi", "rdi", "dil", "bp", "ebp", "rbp", "bpl", "sp",
-        "esp", "rsp", "spl", "ip", "eip", "rip", "cs", "ds", "es", "fs", "gs", "ss", "eflags", "rflags",
-    ];
-    if w.len() > 6 {
+/// Named x86 registers, looked up through the spec's `variables` list.
+const X86_REGISTERS: &[&str] = &[
+    "al", "ah", "ax", "eax", "rax", "bl", "bh", "bx", "ebx", "rbx", "cl", "ch", "cx", "ecx", "rcx", "dl", "dh", "dx",
+    "edx", "rdx", "si", "esi", "rsi", "sil", "di", "edi", "rdi", "dil", "bp", "ebp", "rbp", "bpl", "sp", "esp", "rsp",
+    "spl", "ip", "eip", "rip", "cs", "ds", "es", "fs", "gs", "ss", "eflags", "rflags",
+];
+
+const ARM_REGISTERS: &[&str] =
+    &["sp", "lr", "pc", "fp", "ip", "xzr", "wzr", "wsp", "apsr", "cpsr", "spsr", "fpscr", "fpsr", "fpcr", "nzcv"];
+
+const RISCV_REGISTERS: &[&str] = &["zero", "ra", "sp", "gp", "tp", "fp", "pc"];
+
+/// Numbered registers such as `r8d`, `xmm3`, `x29`, `v0` or `a7`.
+fn indexed_register(w: &[u8], arch: Arch) -> bool {
+    if w.len() > 6 || (arch != Arch::Nasm && !w.last().is_some_and(u8::is_ascii_digit)) {
         return false;
     }
-    let n = w.len();
-    let sized = n > 2 && matches!(w[n - 1] | 0x20, b'd' | b'w' | b'b') && w[n - 2].is_ascii_digit();
-    let base = if sized { &w[..n - 1] } else { w };
-    any_eq(w, NAMED)
-        || indexed(base, "r", 15)
-        || ["xmm", "ymm", "zmm"].iter().any(|p| indexed(w, p, 31))
-        || ["cr", "dr", "mm", "st", "k"].iter().any(|p| indexed(w, p, 15))
-}
-
-fn arm_register(w: &[u8]) -> bool {
-    const NAMED: &[&str] =
-        &["sp", "lr", "pc", "fp", "ip", "xzr", "wzr", "wsp", "apsr", "cpsr", "spsr", "fpscr", "fpsr", "fpcr", "nzcv"];
-    any_eq(w, NAMED)
-        || indexed(w, "r", 15)
-        || indexed(w, "x", 30)
-        || indexed(w, "w", 30)
-        || ["v", "q", "d", "s", "h", "b", "z"].iter().any(|p| indexed(w, p, 31))
-}
-
-fn riscv_register(w: &[u8]) -> bool {
-    any_eq(w, &["zero", "ra", "sp", "gp", "tp", "fp", "pc"])
-        || [("x", 31), ("f", 31), ("v", 31), ("t", 6), ("s", 11), ("a", 7), ("ft", 11), ("fs", 11), ("fa", 7)]
-            .iter()
-            .any(|&(p, max)| indexed(w, p, max))
+    match arch {
+        Arch::Nasm => {
+            let n = w.len();
+            let sized = n > 2 && matches!(w[n - 1] | 0x20, b'd' | b'w' | b'b') && w[n - 2].is_ascii_digit();
+            let base = if sized { &w[..n - 1] } else { w };
+            indexed(base, "r", 15)
+                || ["xmm", "ymm", "zmm"].iter().any(|p| indexed(w, p, 31))
+                || ["cr", "dr", "mm", "st", "k"].iter().any(|p| indexed(w, p, 15))
+        }
+        Arch::Gas => false,
+        Arch::Arm => {
+            indexed(w, "r", 15)
+                || indexed(w, "x", 30)
+                || indexed(w, "w", 30)
+                || ["v", "q", "d", "s", "h", "b", "z"].iter().any(|p| indexed(w, p, 31))
+        }
+        Arch::RiscV => {
+            [("x", 31), ("f", 31), ("v", 31), ("t", 6), ("s", 11), ("a", 7), ("ft", 11), ("fs", 11), ("fa", 7)]
+                .iter()
+                .any(|&(p, max)| indexed(w, p, max))
+        }
+    }
 }
 
 /// Whether the word at `start` is where an instruction or directive goes:
@@ -275,6 +325,10 @@ fn asm_hook(lx: &mut Lexer, arch: Arch) -> bool {
                         ctx.pos = i;
                         scan_number(ctx, false);
                         ctx.emit_from(start, Kind::Number);
+                    } else if next.is_ascii_alphabetic() || matches!(next, b'_' | b'.') {
+                        // `$symbol` is the address of a symbol as an immediate.
+                        let end = scan(ctx, start + 1, |c| is_ident(c) || c == b'.');
+                        put(ctx, start, end, Kind::Constant);
                     } else {
                         ctx.token(1, Kind::Operator);
                     }
@@ -282,6 +336,24 @@ fn asm_hook(lx: &mut Lexer, arch: Arch) -> bool {
                 }
                 _ => false,
             }
+        }
+        b'0'..=b'9' => {
+            // GNU numeric local labels: `1:` defines one, `1b` and `1f` refer back and forward.
+            let ctx = &mut *lx.ctx;
+            if start > 0 && is_ident(ctx.src[start - 1]) {
+                return false;
+            }
+            let end = scan(ctx, start, |c| c.is_ascii_digit());
+            let kind = if ctx.at(end) == b':' && ctx.at(end + 1) != b':' && asm_statement_start(ctx, start, arch) {
+                Kind::Function
+            } else if matches!(ctx.at(end), b'b' | b'f') && !is_ident(ctx.at(end + 1)) {
+                put(ctx, start, end + 1, Kind::Text);
+                return true;
+            } else {
+                return false;
+            };
+            put(ctx, start, end, kind);
+            true
         }
         _ => {
             if b == b'.' && !(next.is_ascii_alphabetic() || next == b'_') {
@@ -297,7 +369,9 @@ fn asm_hook(lx: &mut Lexer, arch: Arch) -> bool {
                 let j = scan(ctx, i, |c| c.is_ascii_alphanumeric());
                 if b == b'.' {
                     Kind::Meta
-                } else if any_eq(&ctx.src[i..j], ASM_DATA) || (ctx.at(i) == b'=' && ctx.at(i + 1) != b'=') {
+                } else if (ctx.at(i) == b'=' && ctx.at(i + 1) != b'=')
+                    || (arch == Arch::Nasm && (2..=4).contains(&(j - i)) && any_eq(&ctx.src[i..j], ASM_DATA))
+                {
                     Kind::Function
                 } else {
                     Kind::Keyword
@@ -305,15 +379,10 @@ fn asm_hook(lx: &mut Lexer, arch: Arch) -> bool {
             } else if b == b'.' {
                 Kind::Text
             } else {
+                // Named registers come from the `variables` list through the generic rules.
                 let word = &ctx.src[start..end];
                 let base = &word[..word.iter().position(|&c| c == b'.').unwrap_or(word.len())];
-                let register = match arch {
-                    Arch::Nasm => x86_register(base),
-                    Arch::Gas => false,
-                    Arch::Arm => arm_register(base),
-                    Arch::RiscV => riscv_register(base),
-                };
-                if !register {
+                if !indexed_register(base, arch) {
                     return false;
                 }
                 Kind::Variable
@@ -341,6 +410,8 @@ fn riscv_hook(lx: &mut Lexer) -> bool {
 }
 
 const ASM_HOOK_CHARS: &str = concat!(letters!(), "_.%$#");
+/// GNU syntax also has numeric local labels.
+const GNU_HOOK_CHARS: &str = concat!(letters!(), "_.%$#0123456789");
 const ASM_OPERATORS: &str = "+-*/%=&|^!<>~";
 
 const ASM_BASE: Spec = Spec {
@@ -363,11 +434,13 @@ static NASM_SPEC: Spec = Spec {
         "incbin",
     ],
     types: &["byte", "word", "dword", "qword", "tword", "oword", "yword", "zword"],
+    variables: X86_REGISTERS,
     hook: Some(nasm_hook),
     ..ASM_BASE
 };
 
-static GAS_SPEC: Spec = Spec { line_comments: &["#", "//"], hook: Some(gas_hook), ..ASM_BASE };
+static GAS_SPEC: Spec =
+    Spec { line_comments: &["#", "//"], hook: Some(gas_hook), hook_chars: GNU_HOOK_CHARS, ..ASM_BASE };
 
 static ARM_SPEC: Spec = Spec {
     line_comments: &["@", "//", ";"],
@@ -375,11 +448,19 @@ static ARM_SPEC: Spec = Spec {
         "lsl", "lsr", "asr", "ror", "rrx", "uxtb", "uxth", "uxtw", "uxtx", "sxtb", "sxth", "sxtw", "sxtx", "eq", "ne",
         "cs", "hs", "cc", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al",
     ],
+    variables: ARM_REGISTERS,
     hook: Some(arm_hook),
+    hook_chars: GNU_HOOK_CHARS,
     ..ASM_BASE
 };
 
-static RISCV_SPEC: Spec = Spec { line_comments: &["#"], hook: Some(riscv_hook), ..ASM_BASE };
+static RISCV_SPEC: Spec = Spec {
+    line_comments: &["#"],
+    variables: RISCV_REGISTERS,
+    hook: Some(riscv_hook),
+    hook_chars: GNU_HOOK_CHARS,
+    ..ASM_BASE
+};
 
 pub static ASM: Definition = Definition::new("asm", "Assembly", Engine::Generic(&NASM_SPEC))
     .aliases(&["nasm", "x86asm", "assembly", "x86", "yasm", "masm"])
@@ -554,11 +635,28 @@ pub static WAT: Definition = Definition::new("wat", "WebAssembly Text", Engine::
 
 // Fortran
 
-/// `.and.` style operators, `.true.` and `%component` access.
+/// `.and.` style operators, `.true.`, `%component` access and fixed form comments.
 fn fortran_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     match ctx.peek() {
+        b'c' | b'C' | b'*' => {
+            // Fixed form: `C`, `c` or `*` in column 1. Free form code such as
+            // `c = 1`, `c(i) = 2` or `call` at column 1 is left alone.
+            if start > 0 && ctx.src[start - 1] != b'\n' {
+                return false;
+            }
+            let next = ctx.peek_at(1);
+            if ctx.peek() != b'*' {
+                let after = ctx.next_non_space(start + 1);
+                if is_ident(next) || matches!(after, b'=' | b'(' | b'%') {
+                    return false;
+                }
+            }
+            let end = ctx.line_end(start);
+            put(ctx, start, end, Kind::Comment);
+            true
+        }
         b'.' => {
             let end = scan(ctx, start + 1, |c| c.is_ascii_alphabetic());
             if end == start + 1 || ctx.at(end) != b'.' {
@@ -615,7 +713,7 @@ static FORTRAN_SPEC: Spec = Spec {
     case_insensitive: true,
     features: PREPROCESSOR,
     hook: Some(fortran_hook),
-    hook_chars: ".%",
+    hook_chars: ".%cC*",
     ..Spec::DEFAULT
 };
 
@@ -798,26 +896,25 @@ static ADA_SPEC: Spec = Spec {
     ..Spec::DEFAULT
 };
 
-/// VHDL port, signal and label declarations (`name :` but not `name :=`).
+/// The subtype in VHDL declarations: `name : [in|out] type`. The declared
+/// names themselves come from `IDENT_KEYS`.
 fn vhdl_hook(lx: &mut Lexer) -> bool {
     let start = lx.ctx.pos;
     let b = lx.ctx.peek();
     if b == b'\'' || b.is_ascii_digit() {
         return tick_hook(lx);
     }
-    let end = lx.scan_ident(start);
-    let colon = lx.ctx.skip_spaces_from(end);
-    let declared = lx.ctx.at(colon) == b':' && !matches!(lx.ctx.at(colon + 1), b'=' | b':');
-    // The subtype in `name : [in|out] type`.
-    let typed =
-        lx.ctx.prev_non_space(start) == b':' || any_eq(word_before(lx.ctx, start), &["in", "out", "inout", "buffer"]);
-    if !declared && !typed {
+    let ctx = &*lx.ctx;
+    let prev = ctx.prev_non_space(start);
+    let typed = prev == b':'
+        || (prev.is_ascii_alphabetic() && any_eq(word_before(ctx, start), &["in", "out", "inout", "buffer"]));
+    if !typed {
         return false;
     }
+    let end = lx.scan_ident(start);
     lx.ctx.pos = end;
     let kind = match lx.classify(start, end) {
-        Kind::Text | Kind::Constant if declared => Kind::Property,
-        Kind::Text if typed => Kind::Type,
+        Kind::Text | Kind::Constant => Kind::Type,
         k => k,
     };
     lx.ctx.emit(start, end, kind);
@@ -866,7 +963,7 @@ static VHDL_SPEC: Spec = Spec {
     ],
     case_insensitive: true,
     operators: "+-*/=&|<>:",
-    features: UPPER_CONSTANTS,
+    features: UPPER_CONSTANTS | IDENT_KEYS,
     hook: Some(vhdl_hook),
     hook_chars: concat!(letters!(), "'0123456789"),
     ..Spec::DEFAULT
@@ -937,19 +1034,18 @@ fn verilog_word(lx: &mut Lexer) -> bool {
     lx.ctx.pos = end;
     let kind = lx.classify(start, end);
     let ctx = &*lx.ctx;
-    let spec = lx.spec;
     let kind = match kind {
         Kind::Text | Kind::Function if ctx.at(after) == b'#' && ctx.at(after + 1) == b'(' => Kind::Type,
         Kind::Text if ctx.at(after).is_ascii_alphabetic() || ctx.at(after) == b'_' => {
             let name_end = scan(ctx, after, is_ident);
             let name = &ctx.src[after..name_end];
-            if ctx.next_non_space(name_end) == b'(' && !any_eq(name, spec.keywords) {
+            if ctx.next_non_space(name_end) == b'(' && lx.word_kind(name) != Some(Kind::Keyword) {
                 Kind::Type
             } else {
                 Kind::Text
             }
         }
-        Kind::Function if verilog_instance(ctx, start, spec) => Kind::Text,
+        Kind::Function if verilog_instance(lx, start) => Kind::Text,
         k => k,
     };
     lx.ctx.emit(start, end, kind);
@@ -957,7 +1053,8 @@ fn verilog_word(lx: &mut Lexer) -> bool {
 }
 
 /// Whether the identifier at `start` follows a module name or a `#(...)` parameter list.
-fn verilog_instance(ctx: &Ctx, start: usize, spec: &Spec) -> bool {
+fn verilog_instance(lx: &Lexer, start: usize) -> bool {
+    let ctx = &*lx.ctx;
     let mut i = start;
     while i > 0 && matches!(ctx.src[i - 1], b' ' | b'\t' | b'\n' | b'\r') {
         i -= 1;
@@ -988,7 +1085,7 @@ fn verilog_instance(ctx: &Ctx, start: usize, spec: &Spec) -> bool {
         i -= 1;
     }
     let word = &ctx.src[i..word_end];
-    !word.is_empty() && !word[0].is_ascii_digit() && !any_eq(word, spec.keywords) && !any_eq(word, spec.types)
+    !word.is_empty() && !word[0].is_ascii_digit() && !matches!(lx.word_kind(word), Some(Kind::Keyword | Kind::Type))
 }
 
 const VERILOG_KEYWORDS: &[&str] = &[
@@ -1210,33 +1307,41 @@ fn vb_hook(lx: &mut Lexer) -> bool {
 
 static VB_INTERP: Str = Str::quoted("\"").raw().doubled();
 
-static VB_SPEC: Spec = Spec {
+/// Keywords VB.NET and VBA share; each dialect adds its own below.
+macro_rules! vb_keywords {
+    ($($extra:literal),* $(,)?) => {
+        &[
+            "alias", "and", "as", "byref", "byval", "call", "case", "const", "declare", "dim", "do", "each", "else",
+            "elseif", "end", "enum", "erase", "error", "event", "exit", "for", "friend", "function", "get", "goto",
+            "if", "implements", "in", "is", "lib", "like", "loop", "mod", "new", "next", "not", "on", "option",
+            "optional", "or", "paramarray", "private", "property", "public", "raiseevent", "redim", "resume",
+            "return", "select", "set", "static", "step", "stop", "sub", "then", "to", "typeof", "until", "while",
+            "with", "withevents", "xor", "explicit", "compare", $($extra),*
+        ]
+    };
+}
+
+static VBNET_SPEC: Spec = Spec {
     line_comments: &["'"],
     strings: &[Str::quoted("\"").raw().doubled()],
-    keywords: &[
-        "addhandler", "addressof", "alias", "and", "andalso", "as", "byref", "byval", "call", "case", "catch", "class",
-        "const", "continue", "declare", "default", "delegate", "dim", "do", "each", "else", "elseif", "end", "enum",
-        "erase", "error", "event", "exit", "finally", "for", "friend", "function", "get", "global", "goto", "handles",
-        "if", "implements", "imports", "in", "inherits", "interface", "is", "isnot", "let", "lib", "like", "loop",
-        "mod", "module", "mustinherit", "mustoverride", "namespace", "narrowing", "new", "next", "not", "of", "on",
-        "operator", "option", "optional", "or", "orelse", "overloads", "overridable", "overrides", "paramarray",
-        "partial", "private", "property", "protected", "public", "raiseevent", "readonly", "redim", "removehandler",
-        "resume", "return", "select", "set", "shadows", "shared", "static", "step", "stop", "structure", "sub",
-        "synclock", "then", "throw", "to", "try", "trycast", "typeof", "until", "using", "wend", "when", "while",
-        "widening", "with", "withevents", "writeonly", "xor", "async", "await", "yield", "iterator", "explicit",
-        "strict", "compare", "gosub", "attribute", "ctype", "directcast", "gettype",
+    keywords: vb_keywords![
+        "addhandler", "addressof", "andalso", "catch", "class", "continue", "default", "delegate", "finally", "global",
+        "handles", "imports", "inherits", "interface", "isnot", "module", "mustinherit", "mustoverride", "namespace",
+        "narrowing", "of", "operator", "orelse", "overloads", "overridable", "overrides", "partial", "protected",
+        "readonly", "removehandler", "shadows", "shared", "structure", "synclock", "throw", "try", "trycast", "using",
+        "when", "widening", "writeonly", "async", "await", "yield", "iterator", "strict", "ctype", "directcast",
+        "gettype", "nameof",
     ],
     types: &[
-        "boolean", "byte", "char", "date", "decimal", "double", "integer", "long", "object", "sbyte", "short",
-        "single", "string", "uinteger", "ulong", "ushort", "variant", "currency", "collection",
+        "boolean", "byte", "date", "decimal", "double", "integer", "long", "object", "single", "string", "char",
+        "sbyte", "short", "uinteger", "ulong", "ushort",
     ],
     builtins: &[
-        "msgbox", "inputbox", "debug", "console", "cstr", "cint", "clng", "cdbl", "cbool", "cdate", "len", "left",
+        "msgbox", "inputbox", "console", "debug", "cstr", "cint", "clng", "cdbl", "cbool", "cdate", "len", "left",
         "right", "mid", "trim", "ucase", "lcase", "instr", "replace", "split", "join", "format", "now", "isnothing",
-        "isnumeric", "isempty", "createobject", "application", "activesheet", "worksheets", "range", "cells",
-        "thisworkbook",
+        "isnumeric",
     ],
-    constants: &["true", "false", "nothing", "null", "empty", "vbcrlf", "vbtab", "vbnewline"],
+    constants: &["true", "false", "nothing", "vbcrlf", "vbtab", "vbnewline"],
     variables: &["me", "mybase", "myclass"],
     type_keywords: &["as", "of", "class", "structure", "module", "interface", "enum", "new", "inherits", "implements"],
     case_insensitive: true,
@@ -1246,11 +1351,30 @@ static VB_SPEC: Spec = Spec {
     ..Spec::DEFAULT
 };
 
-pub static VBNET: Definition = Definition::new("vbnet", "Visual Basic .NET", Engine::Generic(&VB_SPEC))
+static VBA_SPEC: Spec = Spec {
+    keywords: vb_keywords!["let", "wend", "gosub", "attribute", "type", "open", "close", "print"],
+    types: &[
+        "boolean", "byte", "date", "decimal", "double", "integer", "long", "object", "single", "string", "variant",
+        "currency", "collection", "longlong", "longptr",
+    ],
+    builtins: &[
+        "msgbox", "inputbox", "debug", "cstr", "cint", "clng", "cdbl", "cbool", "cdate", "len", "left", "right", "mid",
+        "trim", "ucase", "lcase", "instr", "replace", "split", "join", "format", "now", "isnumeric", "isempty",
+        "isnull", "isobject", "createobject", "application", "activesheet", "activeworkbook", "worksheets", "range",
+        "cells", "thisworkbook",
+    ],
+    constants: &["true", "false", "nothing", "null", "empty", "vbcrlf", "vbtab", "vbnewline", "vbnullstring"],
+    variables: &["me"],
+    type_keywords: &["as", "new", "enum", "type", "implements"],
+    hook_chars: "#&rReE",
+    ..VBNET_SPEC
+};
+
+pub static VBNET: Definition = Definition::new("vbnet", "Visual Basic .NET", Engine::Generic(&VBNET_SPEC))
     .aliases(&["vb", "vb.net", "visualbasic", "visual-basic"])
     .extensions(&["vb"]);
 
-pub static VBA: Definition = Definition::new("vba", "VBA", Engine::Generic(&VB_SPEC))
+pub static VBA: Definition = Definition::new("vba", "VBA", Engine::Generic(&VBA_SPEC))
     .aliases(&["vbscript", "vbs", "bas", "visual-basic-for-applications"])
     .extensions(&["vba", "vbs", "bas"]);
 
@@ -1331,22 +1455,25 @@ fn forth_hook(lx: &mut Lexer) -> bool {
             put(ctx, end, close, Kind::String);
         }
         _ => {
-            let defines = any_eq(
-                word,
-                &["variable", "2variable", "fvariable", "constant", "2constant", "fconstant", "value", "create", "to"],
-            );
             ctx.pos = end;
             let kind = match lx.classify(start, end) {
-                Kind::Text if forth_number(&lx.ctx.src[start..end]) => Kind::Number,
+                Kind::Text if forth_number(word) => Kind::Number,
+                Kind::Keyword
+                    if any_eq(
+                        word,
+                        &[
+                            "variable", "2variable", "fvariable", "constant", "2constant", "fconstant", "value",
+                            "create", "to",
+                        ],
+                    ) =>
+                {
+                    // The next word is the name being defined.
+                    lx.set_pending(Some(Kind::Variable));
+                    Kind::Keyword
+                }
                 k => k,
             };
             lx.ctx.emit(start, end, kind);
-            if defines {
-                let ctx = &mut *lx.ctx;
-                let i = scan(ctx, end, |c| matches!(c, b' ' | b'\t'));
-                let j = scan(ctx, i, |c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r'));
-                put(ctx, i, j, Kind::Variable);
-            }
         }
     }
     true
@@ -1406,25 +1533,66 @@ fn matlab_hook(lx: &mut Lexer) -> bool {
         }
         _ => {
             let end = lx.scan_ident(start);
-            if &lx.ctx.src[start..end] != b"function" {
-                return false;
+            let word = &lx.ctx.src[start..end];
+            if word == b"function" {
+                put(lx.ctx, start, end, Kind::Keyword);
+                // `function [a, b] = name(...)`: lex the outputs, then name the function.
+                let ctx = &mut *lx.ctx;
+                let line_end = ctx.line_end_within(end, 512);
+                let paren = ctx.find_in(end, line_end, b"(").unwrap_or(line_end);
+                let eq = ctx.find_in(end, paren, b"=");
+                if let Some(eq) = eq {
+                    ctx.embed_spec(&MATLAB_SPEC, end, eq);
+                    put(ctx, eq, eq + 1, Kind::Operator);
+                }
+                // Property accessors `get.Name` are named as a whole; plain names are left pending.
+                let name = ctx.skip_spaces_from(eq.map_or(end, |e| e + 1));
+                let name_end = scan(ctx, name, |c| is_ident(c) || c == b'.');
+                if ctx.src[name..name_end].contains(&b'.') {
+                    put(ctx, name, name_end, Kind::Function);
+                } else {
+                    lx.set_pending(Some(Kind::Function));
+                }
+                return true;
             }
-            put(lx.ctx, start, end, Kind::Keyword);
-            let ctx = &mut *lx.ctx;
-            let line_end = ctx.line_end(end);
-            let paren = ctx.src[end..line_end].iter().position(|&c| c == b'(').map_or(line_end, |i| end + i);
-            let eq = ctx.src[end..paren].iter().position(|&c| c == b'=').map(|i| end + i);
-            let name = ctx.skip_spaces_from(eq.map_or(end, |e| e + 1));
-            if let Some(eq) = eq {
-                ctx.embed_spec(&MATLAB_SPEC, end, eq);
-                put(ctx, eq, eq + 1, Kind::Operator);
-            }
-            let name_end = scan(ctx, name, |c| is_ident(c) || c == b'.');
-            put(ctx, name, name_end, Kind::Function);
-            lx.mark_value();
-            true
+            matlab_command(lx, start, end)
         }
     }
+}
+
+/// Command syntax at the start of a statement: `hold on`, `format long`, `close all`, `clc`.
+fn matlab_command(lx: &mut Lexer, start: usize, end: usize) -> bool {
+    const COMMANDS: &[&str] = &[
+        "hold", "format", "close", "clear", "clc", "clf", "clearvars", "warning", "more", "pkg", "load", "save", "cd",
+        "axis", "grid", "box", "figure", "echo", "diary", "syms", "rng", "drawnow", "shg",
+    ];
+    let ctx = &*lx.ctx;
+    let word = &ctx.src[start..end];
+    if word.len() < 2 || word.len() > 9 || !matches!(byte_before(ctx, start), 0 | b'\n' | b';' | b',') {
+        return false;
+    }
+    // A plain call or assignment is not command syntax: `hold(ax, 'on')`, `figure = 1`, `close - 1`.
+    let arg = ctx.skip_spaces_from(end);
+    let after = ctx.at(arg);
+    let has_args = arg > end
+        && (after.is_ascii_alphanumeric()
+            || matches!(after, b'.' | b'/')
+            || (after == b'-' && ctx.at(arg + 1) != b' '));
+    if !(has_args || matches!(after, b'\n' | b'\r' | b';' | b',' | b'%' | 0)) || !any_eq(word, COMMANDS) {
+        return false;
+    }
+    put(lx.ctx, start, end, Kind::Builtin);
+    if has_args {
+        let ctx = &mut *lx.ctx;
+        let stop = scan(ctx, arg, |c| !matches!(c, b';' | b',' | b'%' | b'\n'));
+        let mut text_end = stop;
+        while text_end > arg && matches!(ctx.src[text_end - 1], b' ' | b'\t' | b'\r') {
+            text_end -= 1;
+        }
+        put(ctx, arg, text_end, Kind::String);
+    }
+    lx.mark_value();
+    true
 }
 
 static MATLAB_SPEC: Spec = Spec {
@@ -1446,7 +1614,7 @@ static MATLAB_SPEC: Spec = Spec {
     constants: &["true", "false", "pi", "eps", "Inf", "inf", "NaN", "nan"],
     features: MEMBERS,
     hook: Some(matlab_hook),
-    hook_chars: "'%#f",
+    hook_chars: "'%#abcdefghlmprs",
     ..Spec::DEFAULT
 };
 
@@ -1455,11 +1623,97 @@ pub static MATLAB: Definition =
 
 // Wolfram Language
 
-/// Symbols, `f[x]` calls, `x_Integer` patterns and `#` slots.
+/// End of a named character such as `\[Alpha]` at `pos`, or `pos` if there is none.
+fn wolfram_named_char(ctx: &Ctx, pos: usize) -> usize {
+    if ctx.at(pos) != b'\\' || ctx.at(pos + 1) != b'[' {
+        return pos;
+    }
+    let end = scan(ctx, pos + 2, |c| c.is_ascii_alphanumeric());
+    if end > pos + 2 && ctx.at(end) == b']' {
+        end + 1
+    } else {
+        pos
+    }
+}
+
+/// A string where `\[Name]`, `\:XXXX` and `\.XX` are escapes as well as `\n` style ones.
+fn wolfram_string(ctx: &mut Ctx, start: usize) {
+    let mut i = start + 1;
+    let mut seg = start;
+    while i < ctx.len() {
+        match ctx.src[i] {
+            b'"' => {
+                i += 1;
+                break;
+            }
+            b'\\' => {
+                let mut end = wolfram_named_char(ctx, i);
+                if end == i {
+                    let hex = match ctx.at(i + 1) {
+                        b':' => 4,
+                        b'.' => 2,
+                        _ => 0,
+                    };
+                    end = if hex > 0 { scan(ctx, i + 2, |c| c.is_ascii_hexdigit()).min(i + 2 + hex) } else { i + 2 };
+                    // Never split a multi byte character.
+                    while end < ctx.len() && (ctx.src[end] & 0xC0) == 0x80 {
+                        end += 1;
+                    }
+                }
+                ctx.emit(seg, i, Kind::String);
+                ctx.emit(i, end, Kind::Escape);
+                i = end.min(ctx.len());
+                seg = i;
+            }
+            _ => i += 1,
+        }
+    }
+    ctx.emit(seg, i, Kind::String);
+    ctx.pos = i;
+}
+
+/// Symbols, `f[x]` calls, `x_Integer` patterns, `#` slots, strings and named characters.
 fn wolfram_hook(lx: &mut Lexer) -> bool {
     let start = lx.ctx.pos;
     let b = lx.ctx.peek();
     let symbol = |c: u8| c.is_ascii_alphanumeric() || c == b'$' || c == b'`';
+    if b == b'"' {
+        wolfram_string(lx.ctx, start);
+        lx.mark_value();
+        return true;
+    }
+    if b == b'\\' {
+        let ctx = &mut *lx.ctx;
+        let end = wolfram_named_char(ctx, start);
+        if end == start {
+            return false;
+        }
+        let name = &ctx.src[start + 2..end - 1];
+        let kind = if any_eq(name, &["Pi", "Infinity", "ExponentialE", "ImaginaryI", "ImaginaryJ", "Degree"]) {
+            Kind::Constant
+        } else if any_eq(
+            name,
+            &[
+                "Rule", "RuleDelayed", "Element", "NotElement", "Equal", "NotEqual", "LessEqual", "GreaterEqual",
+                "And", "Or", "Not", "Implies", "Function", "Times", "Cross", "Divide", "Union", "Intersection",
+                "Subset", "SubsetEqual", "Rightarrow", "LeftArrow", "RightArrow", "Map", "Distributed",
+            ],
+        ) {
+            Kind::Operator
+        } else if ctx.at(end) == b'_' {
+            // A pattern such as `\[Alpha]_`.
+            Kind::Variable
+        } else {
+            Kind::Text
+        };
+        put(ctx, start, end, kind);
+        if kind == Kind::Operator {
+            lx.mark_operator();
+        } else {
+            lx.mark_value();
+        }
+        return true;
+    }
     if b == b'#' {
         let ctx = &mut *lx.ctx;
         let mut end = start + 1;
@@ -1515,7 +1769,7 @@ static WOLFRAM_SPEC: Spec = Spec {
     ],
     operators: "+-*/=&|^!<>~?:@.",
     hook: Some(wolfram_hook),
-    hook_chars: concat!(letters!(), "$#_"),
+    hook_chars: concat!(letters!(), "$#_\\\""),
     ..Spec::DEFAULT
 };
 
@@ -1531,11 +1785,37 @@ const SAS_MACRO: &[&str] = &[
     "symdel", "abort",
 ];
 
-/// `%macro` statements and calls, and `* comment;` statements.
+/// `&name`, `&&name` and `&name.` macro references in a double quoted SAS string.
+fn sas_ref(ctx: &Ctx, i: usize) -> usize {
+    if ctx.at(i) != b'&' {
+        return i;
+    }
+    let mut j = i + 1;
+    while ctx.at(j) == b'&' {
+        j += 1;
+    }
+    let c = ctx.at(j);
+    if !(c.is_ascii_alphabetic() || c == b'_') {
+        return i;
+    }
+    let end = scan(ctx, j, is_ident);
+    if ctx.at(end) == b'.' {
+        end + 1
+    } else {
+        end
+    }
+}
+
+/// `%macro` statements and calls, `* comment;` statements and macro references in strings.
 fn sas_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     let next = ctx.peek_at(1);
+    if ctx.peek() == b'"' {
+        string_with_refs(ctx, start, 1, b"\"", sas_ref);
+        lx.mark_value();
+        return true;
+    }
     if ctx.peek() == b'*' {
         if !matches!(ctx.prev_non_space(start), 0 | b';') {
             return false;
@@ -1550,18 +1830,17 @@ fn sas_hook(lx: &mut Lexer) -> bool {
     let end = scan(ctx, start + 1, is_ident);
     let word = &ctx.src[start + 1..end];
     if any_eq(word, SAS_MACRO) {
-        let defines = if any_eq(word, &["macro"]) {
-            Kind::Function
-        } else if any_eq(word, &["let", "global", "local"]) {
-            Kind::Variable
-        } else {
-            Kind::Text
-        };
+        let macro_def = any_eq(word, &["macro"]);
+        let variable = any_eq(word, &["let", "global", "local"]);
         put(ctx, start, end, Kind::Keyword);
-        if defines != Kind::Text {
+        if macro_def {
+            lx.set_pending(Some(Kind::Function));
+        } else if variable {
+            // Macro variables are often named like keywords (`%let data = ...`), which
+            // a pending kind would not override, so the name is taken here.
             let i = ctx.skip_spaces_from(end);
             let j = scan(ctx, i, is_ident);
-            put(ctx, i, j, defines);
+            put(ctx, i, j, Kind::Variable);
         }
     } else {
         put(ctx, start, end, Kind::Function);
@@ -1593,7 +1872,7 @@ static SAS_SPEC: Spec = Spec {
     case_insensitive: true,
     features: CALLS,
     hook: Some(sas_hook),
-    hook_chars: "%*",
+    hook_chars: "%*\"",
     ..Spec::DEFAULT
 };
 
@@ -1601,21 +1880,35 @@ pub static SAS: Definition = Definition::new("sas", "SAS", Engine::Generic(&SAS_
 
 // Stata
 
-/// Local macros `` `name' ``, compound strings `` `"..."' `` and `*` comment lines.
+/// `` `local' ``, `$global` and `${global}` macro references in a Stata string.
+fn stata_ref(ctx: &Ctx, i: usize) -> usize {
+    match ctx.at(i) {
+        b'`' if ctx.at(i + 1) != b'"' => {
+            let limit = ctx.line_end_within(i, 128);
+            ctx.find_in(i + 1, limit, b"'").map_or(i, |close| close + 1)
+        }
+        b'$' if ctx.at(i + 1) == b'{' => {
+            let limit = ctx.line_end_within(i, 128);
+            ctx.find_in(i + 2, limit, b"}").map_or(i, |close| close + 1)
+        }
+        b'$' if ctx.at(i + 1).is_ascii_alphabetic() || ctx.at(i + 1) == b'_' => scan(ctx, i + 1, is_ident),
+        _ => i,
+    }
+}
+
+/// Local macros `` `name' ``, strings with macro references and `*` comment lines.
 fn stata_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     match ctx.peek() {
-        b'`' if ctx.peek_at(1) == b'"' => {
-            let end = ctx.find(start + 2, b"\"'").map_or(ctx.len(), |i| i + 2);
-            put(ctx, start, end, Kind::String);
-        }
+        b'"' => string_with_refs(ctx, start, 1, b"\"", stata_ref),
+        b'`' if ctx.peek_at(1) == b'"' => string_with_refs(ctx, start, 2, b"\"'", stata_ref),
         b'`' => {
-            let line_end = ctx.line_end(start);
-            let Some(close) = ctx.src[start + 1..line_end].iter().position(|&c| c == b'\'') else {
+            let end = stata_ref(ctx, start);
+            if end == start {
                 return false;
-            };
-            put(ctx, start, start + close + 2, Kind::Variable);
+            }
+            put(ctx, start, end, Kind::Variable);
         }
         _ => {
             if !ctx.at_line_start(start) {
@@ -1654,7 +1947,7 @@ static STATA_SPEC: Spec = Spec {
     sigils: &[(b'$', Kind::Variable)],
     features: CALLS,
     hook: Some(stata_hook),
-    hook_chars: "`*",
+    hook_chars: "`*\"",
     ..Spec::DEFAULT
 };
 
@@ -1710,8 +2003,16 @@ fn abap_hook(lx: &mut Lexer) -> bool {
                 end -= 1;
             }
             lx.ctx.pos = end;
-            match lx.classify(start, end) {
-                k if k == Kind::Keyword || dash >= end => lx.ctx.emit(start, end, k),
+            // Dashed keywords (`field-symbols`) stay whole; other words are `structure-component`.
+            match lx.word_kind(&src[start..end]) {
+                Some(Kind::Keyword) => {
+                    let kind = lx.classify(start, end);
+                    lx.ctx.emit(start, end, kind);
+                }
+                _ if dash >= end => {
+                    let kind = lx.classify(start, end);
+                    lx.ctx.emit(start, end, kind);
+                }
                 _ => {
                     let kind = lx.classify(start, dash);
                     lx.ctx.emit(start, dash, kind);
@@ -1772,21 +2073,31 @@ pub static ABAP: Definition = Definition::new("abap", "ABAP", Engine::Generic(&A
 
 // APL
 
-const APL_FUNCTIONS: &str = "+-×÷⌈⌊*⍟|!○~?∊⍷⍴,⍪⌽⊖⍉↑↓⊂⊃⊆⌷⍋⍒⍳⍸∪∩⊣⊢≡≢<≤=≥>≠∨∧⍲⍱⊥⊤⌹⍕⍎^";
-const APL_OPERATORS: &str = "/\\⌿⍀¨⍨⍣.∘⍤⍥@⌸⌺⍠&";
+const APL_FUNCTIONS: &[char] = &[
+    '+', '-', '×', '÷', '⌈', '⌊', '*', '⍟', '|', '!', '○', '~', '?', '∊', '⍷', '⍴', ',', '⍪', '⌽', '⊖', '⍉', '↑', '↓',
+    '⊂', '⊃', '⊆', '⌷', '⍋', '⍒', '⍳', '⍸', '∪', '∩', '⊣', '⊢', '≡', '≢', '<', '≤', '=', '≥', '>', '≠', '∨', '∧', '⍲',
+    '⍱', '⊥', '⊤', '⌹', '⍕', '⍎', '^',
+];
+const APL_OPERATORS: &[char] = &['/', '\\', '⌿', '⍀', '¨', '⍨', '⍣', '.', '∘', '⍤', '⍥', '@', '⌸', '⌺', '⍠', '&'];
 
-/// Decodes the character at `pos` (the input is valid UTF-8).
+/// Decodes the character at `pos` and returns it with its length in bytes.
 fn char_at(ctx: &Ctx, pos: usize) -> (char, usize) {
     let b = ctx.at(pos);
-    let len = match b {
+    if b < 0x80 {
+        return (b as char, 1);
+    }
+    let len: usize = match b {
         0xF0.. => 4,
         0xE0.. => 3,
         0xC0.. => 2,
         _ => 1,
     };
-    let end = (pos + len).min(ctx.len());
-    let c = std::str::from_utf8(&ctx.src[pos..end]).ok().and_then(|s| s.chars().next()).unwrap_or('\u{FFFD}');
-    (c, (end - pos).max(1))
+    let len = len.min(ctx.len() - pos).max(1);
+    let mut c = u32::from(b & (0x7F >> len));
+    for k in 1..len {
+        c = (c << 6) | u32::from(ctx.at(pos + k) & 0x3F);
+    }
+    (char::from_u32(c).unwrap_or('\u{FFFD}'), len)
 }
 
 fn apl(ctx: &mut Ctx) {
@@ -1857,8 +2168,8 @@ fn apl(ctx: &mut Ctx) {
                 }
                 ctx.pos = i;
             }
-            _ if APL_FUNCTIONS.contains(c) => put(ctx, start, start + len, Kind::Operator),
-            _ if APL_OPERATORS.contains(c) => put(ctx, start, start + len, Kind::Keyword),
+            _ if APL_FUNCTIONS.contains(&c) => put(ctx, start, start + len, Kind::Operator),
+            _ if APL_OPERATORS.contains(&c) => put(ctx, start, start + len, Kind::Keyword),
             _ => ctx.pos = start + len,
         }
     }
