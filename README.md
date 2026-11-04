@@ -162,7 +162,7 @@ With `theme: false` each token gets the class `cc-<kind>`, for example `cc-keywo
 
 A theme is a background, a foreground and colors for the [kinds](#token-kinds) you care about. Anything you leave out inherits something sensible: `tag` and `meta` borrow the `keyword` color, `builtin` borrows `function`, `escape` borrows `constant`, and so on.
 
-Here is a theme in Discord's colors, something that will never ship built in:
+For example, a theme in Discord's colors:
 
 ```js
 import { defineTheme, highlight } from "colorfulcode";
