@@ -38,6 +38,7 @@ my $ref = { list => [1, 2, 3] };
 print "Total: ${\ floor(3.7)}\n" if @{$ref->{list}};
 my $re = qr{^(\d+)\s*$}x;
 $text =~ s{foo}{bar}g;
+print "First: $ref->{list}[0] of @{[ scalar keys %config ]} keys\n";
 
 __END__
 This is ignored data.

@@ -44,3 +44,5 @@ class Greeter {
 
 Done:
 ExitApp
+Loop, 3
+    MsgBox, Pass %A_Index% of 3, it's fine

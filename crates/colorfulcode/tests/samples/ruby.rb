@@ -44,3 +44,5 @@ Block comment
 cart = Shop::Cart.new("ana", items: [{ price: 1_000, qty: 2 }])
 puts cart.total(5) unless cart.empty?
 status = cart.empty? ? :empty : :full
+label = cart.empty? ? "none": "#{cart.total(1)}"
+puts "ok" if label =~ /^#{Regexp.escape(label)}$/i

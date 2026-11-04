@@ -39,3 +39,7 @@ if 'lamp-42' ~~ /(\w+) '-' (\d+)/ {
 }
 my @words = qw<red green blue>;
 say total-price(@stock), ' ', %by-name<lamp>.price, ' ', 0xFF;
+my @sizes = <small medium large>;
+my $note = qq:to/END/;
+    Sizes: @sizes[] for {now.Date}
+    END
