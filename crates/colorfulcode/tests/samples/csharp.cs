@@ -42,6 +42,16 @@ public sealed class Order
     }
 }
 
+[Flags]
+public enum Access : byte
+{
+    None = 0,
+    /// Can read (and list).
+    Read = 1 << 0,
+    Write = 1 << 1,
+    All = Read | Write,
+}
+
 public static class Program
 {
     public static void Main(string[] args)

@@ -1,7 +1,7 @@
 //! C, C++, Rust and other languages with C like syntax.
 
 use super::{Definition, Engine};
-use crate::lexer::generic::{features::*, Interp, Lexer, Prefix, Spec, Str};
+use crate::lexer::generic::{block_comment, features::*, scan_number, Interp, Lexer, Prefix, Spec, Str};
 use crate::lexer::{is_ident, is_ident_start, Ctx};
 use crate::Kind;
 
@@ -95,9 +95,7 @@ fn rust_hook(lx: &mut Lexer) -> bool {
             if ctx.at(i) != b'"' {
                 return false;
             }
-            let mut close = vec![b'"'];
-            close.extend(std::iter::repeat(b'#').take(hashes));
-            let end = ctx.find(i + 1, &close).map_or(ctx.len(), |p| p + close.len());
+            let end = hashed_close(ctx, i + 1, hashes);
             ctx.pos = end;
             ctx.emit(start, end, Kind::String);
             lx.mark_value();
@@ -194,10 +192,12 @@ fn cpp_hook(lx: &mut Lexer) -> bool {
     let Some(paren) = ctx.src[delim_start..].iter().take(17).position(|&b| b == b'(') else {
         return false;
     };
-    let mut close = vec![b')'];
-    close.extend_from_slice(&ctx.src[delim_start..delim_start + paren]);
-    close.push(b'"');
-    let end = ctx.find(delim_start + paren, &close).map_or(ctx.len(), |p| p + close.len());
+    let mut close = [0u8; 18];
+    close[0] = b')';
+    close[1..=paren].copy_from_slice(&ctx.src[delim_start..delim_start + paren]);
+    close[paren + 1] = b'"';
+    let close = &close[..paren + 2];
+    let end = ctx.find(delim_start + paren, close).map_or(ctx.len(), |p| p + close.len());
     ctx.pos = end;
     ctx.emit(start, end, Kind::String);
     lx.mark_value();
@@ -258,16 +258,6 @@ fn word_before<'s>(ctx: &Ctx<'s, '_>, pos: usize) -> &'s [u8] {
     &src[start..end]
 }
 
-/// Start of the line containing `pos`.
-fn line_start(ctx: &Ctx, pos: usize) -> usize {
-    let src = ctx.src;
-    let mut i = pos.min(src.len());
-    while i > 0 && src[i - 1] != b'\n' {
-        i -= 1;
-    }
-    i
-}
-
 /// End of a raw string whose body starts at `from` and closes with `"` and `hashes` hashes.
 fn hashed_close(ctx: &Ctx, from: usize, hashes: usize) -> usize {
     let src = ctx.src;
@@ -295,7 +285,7 @@ fn bracket_attribute(lx: &mut Lexer) -> bool {
     if !param && !ctx.at_line_start(start) {
         return false;
     }
-    if !ctx.src[start..ctx.line_end(start)].contains(&b']') {
+    if !ctx.src[start..ctx.line_end_within(start, 1024)].contains(&b']') {
         return false;
     }
     let mut end = lx.scan_ident(start + 1);
@@ -367,38 +357,124 @@ fn type_before(ctx: &Ctx, pos: usize, types: &[&str]) -> bool {
     }
 }
 
-/// Whether an operator or `return` comes right before `pos`, so a name there is a value.
+/// Whether an operator, a spaced ternary or `return` comes right before `pos`, so a name
+/// there is a value.
 fn value_before(ctx: &Ctx, pos: usize) -> bool {
     let mut i = pos;
     while i > 0 && matches!(ctx.src[i - 1], b' ' | b'\t') {
         i -= 1;
     }
+    let spaced = ctx.at(i.wrapping_sub(2)) == b' ';
     match ctx.at(i.wrapping_sub(1)) {
         b'=' | b'+' | b'-' | b'*' | b'/' | b'%' | b'!' | b'&' | b'|' => true,
         b'>' => ctx.at(i.wrapping_sub(2)) == b'=',
-        b'n' => word_before(ctx, i) == b"return",
+        // `c ? First : Last`, but not `Foo? x` or `class A : Base`.
+        b'?' => spaced,
+        b':' => spaced && ctx.find_in(line_start_within(ctx, i, 256), i, b" ? ").is_some(),
+        b'n' => matches!(word_before(ctx, i), b"return" | b"in"),
         _ => false,
     }
 }
 
-/// For languages with PascalCase members (C#): `Name = x`, `string Name { get; }`,
-/// `Foo Bar;` and `x >= Limit` make the name a property instead of a type.
+/// Start of the line containing `pos`, looking back at most `max` bytes.
+fn line_start_within(ctx: &Ctx, pos: usize, max: usize) -> usize {
+    let stop = pos.saturating_sub(max);
+    ctx.src[stop..pos].iter().rposition(|&b| b == b'\n').map_or(stop, |i| stop + i + 1)
+}
+
+/// The innermost bracket left open before `pos` (`(`, `[`, `{`, or `<` right after a name)
+/// and its offset. Looks back at most 512 bytes, gives up at `;` or a closed block, and only
+/// accepts a `{` on the same line.
+fn enclosing_open(ctx: &Ctx, pos: usize) -> Option<(u8, usize)> {
+    let src = ctx.src;
+    let stop = pos.saturating_sub(512);
+    let (mut depth, mut lines) = (0u32, false);
+    let mut i = pos.min(src.len());
+    while i > stop {
+        i -= 1;
+        match src[i] {
+            b'\n' => lines = true,
+            b')' | b']' => depth += 1,
+            b'}' if depth > 0 => depth += 1,
+            b'{' if depth == 0 && lines => return None,
+            b'(' | b'[' | b'{' if depth == 0 => return Some((src[i], i)),
+            b'(' | b'[' | b'{' => depth -= 1,
+            b'<' if depth == 0 && i > 0 && is_ident(src[i - 1]) => return Some((b'<', i)),
+            b';' | b'}' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the `(` at `paren` holds call arguments or a condition (`f(Name)`, `if (Done)`,
+/// `return (A, B)`) rather than types (`typeof(Foo)`, `catch (Exception)`, `(Foo, Bar) pair`).
+fn argument_list(ctx: &Ctx, paren: usize) -> bool {
+    let mut i = paren;
+    while i > 0 && matches!(ctx.src[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    let tight = i == paren;
+    match ctx.at(i.wrapping_sub(1)) {
+        b'>' => tight,
+        b if is_ident(b) => {
+            let word = word_before(ctx, i);
+            if tight {
+                !matches!(word, b"typeof" | b"sizeof" | b"default" | b"catch")
+            } else {
+                matches!(word, b"if" | b"while" | b"switch" | b"return" | b"in")
+            }
+        }
+        _ => value_before(ctx, paren),
+    }
+}
+
+/// For languages with PascalCase members (C#): `Name = x`, `string Name { get; }`, `{Name}`,
+/// `f(Name)`, `x >= Limit` and `return Name;` make the name a property instead of a type.
 fn pascal_member(lx: &mut Lexer, types: &[&str]) -> bool {
     let ctx = &*lx.ctx;
     let start = ctx.pos;
-    if start > 0 && ctx.src[start - 1] == b'.' {
+    if lx.pending().is_some() || (start > 0 && ctx.src[start - 1] == b'.') {
         return false;
     }
     let end = lx.scan_ident(start);
-    let i = ctx.skip_spaces_from(end);
+    let mut i = end;
+    while ctx.at(i).is_ascii_whitespace() {
+        i += 1;
+    }
+    let gap = i > end;
+    let prev = ctx.prev_non_space(start);
+    // Format specifiers: `{Total:C2}`.
+    if ctx.at(start.wrapping_sub(1)) == b':' && ctx.at(end) == b'}' {
+        lx.ctx.pos = end;
+        lx.ctx.emit(start, end, Kind::String);
+        return true;
+    }
+    // `{Name}`, `f(A, B)`, `new[] { A, B }`, `xs[Index]`.
+    let listed = || match prev {
+        b'{' => true,
+        b'(' | b',' | b'[' => match enclosing_open(ctx, start) {
+            Some((b'(', p)) => argument_list(ctx, p),
+            Some((b, _)) => b != b'<',
+            None => false,
+        },
+        _ => false,
+    };
     let member = match ctx.at(i) {
-        b'=' if !matches!(ctx.at(i + 1), b'=' | b'>') => true,
         b'=' if ctx.at(i + 1) == b'>' => type_before(ctx, start, types),
-        b'{' | b';' | b',' | b')' => type_before(ctx, start, types) || value_before(ctx, start),
-        b'?' => matches!(ctx.at(i + 1), b'?' | b'.'),
-        b'.' | b'<' | b'[' | b'(' => false,
-        b if is_ident(b) => false,
-        _ => value_before(ctx, start),
+        b'=' => true,
+        // `(Foo)x` is a cast.
+        b')' if prev == b'(' && !gap && (is_ident_start(ctx.at(i + 1)) || ctx.at(i + 1) == b'(') => false,
+        b'}' | b',' | b';' | b')' | b']' | b'{' | 0 => {
+            listed() || type_before(ctx, start, types) || value_before(ctx, start)
+        }
+        // Named tuple elements and arguments, format specifiers in `{Total:C2}`.
+        b':' if ctx.at(i + 1) != b':' => matches!(prev, b'(' | b',' | b'{') || value_before(ctx, start),
+        b'?' => gap || matches!(ctx.at(i + 1), b'?' | b'.'),
+        b'>' | b'<' if !gap => ctx.at(i + 1) == b'=',
+        b'/' => gap && !matches!(ctx.at(i + 1), b'/' | b'*'),
+        b'!' | b'&' | b'|' | b'+' | b'-' | b'*' | b'%' | b'^' | b'<' | b'>' => gap,
+        _ => false,
     };
     if !member {
         return false;
@@ -426,7 +502,16 @@ const GO_EXPR_KEYWORDS: &[&[u8]] = &[
     b"package", b"import", b"goto", b"break", b"continue", b"func",
 ];
 
-/// Whether a name at `pos` sits where Go expects a type: `*T`, `[]T`, `x T`, `) T`.
+/// Standard packages whose exported members are constants, variables or functions.
+const GO_PACKAGES: &[&[u8]] = &[
+    b"atomic", b"base64", b"big", b"binary", b"bufio", b"bytes", b"context", b"errors", b"exec", b"filepath", b"flag",
+    b"fmt", b"fs", b"hex", b"http", b"io", b"ioutil", b"json", b"log", b"math", b"net", b"os", b"path", b"reflect",
+    b"regexp", b"runtime", b"signal", b"slices", b"slog", b"sort", b"sql", b"strconv", b"strings", b"sync", b"syscall",
+    b"template", b"time", b"tls", b"unicode", b"url", b"utf8",
+];
+
+/// Whether a name at `pos` sits where Go expects a type: `*T`, `[]T`, `x T`, `) T`,
+/// `func(T)`, `(T, error)`, `x.(T)` and type parameters `[T any]`.
 fn go_type_position(ctx: &Ctx, pos: usize) -> bool {
     let src = ctx.src;
     let mut i = pos;
@@ -438,27 +523,78 @@ fn go_type_position(ctx: &Ctx, pos: usize) -> bool {
     }
     let gap = i < pos;
     match src[i - 1] {
-        b'*' | b']' => !gap,
+        // `*T` and `[]T`, but not `5*time.Second`.
+        b'*' => !gap && !(is_ident(ctx.at(i.wrapping_sub(2))) || ctx.at(i.wrapping_sub(2)) == b')'),
+        b']' => !gap,
         b')' => gap,
         b if is_ident(b) => gap && !GO_EXPR_KEYWORDS.contains(&word_before(ctx, i)),
+        b'(' | b',' | b'[' => match enclosing_open(ctx, pos) {
+            Some((b'(', p)) => {
+                let before = ctx.prev_non_space(p);
+                before == b')' || before == b'.' || matches!(word_before(ctx, p), b"func" | b"new")
+            }
+            Some((b'[', p)) => {
+                // `func Map[T any]`, `type List[T any]`.
+                let mut name = p;
+                while name > 0 && is_ident(src[name - 1]) {
+                    name -= 1;
+                }
+                name < p && matches!(word_before(ctx, name), b"func" | b"type")
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
 
-/// Exported names are only types in type positions; qualified types such as `*http.Request`.
+/// For a name alone on its line: a constant in a `const (...)` or `var (...)` block, an
+/// embedded type in a struct or interface.
+fn go_block_member(ctx: &Ctx, pos: usize) -> Kind {
+    let src = ctx.src;
+    let stop = pos.saturating_sub(512);
+    // Look at up to 16 earlier lines, nearest first, for one that decides.
+    let mut end = pos;
+    for _ in 0..16 {
+        let Some(nl) = src[stop..end].iter().rposition(|&b| b == b'\n') else {
+            break;
+        };
+        let line_end = stop + nl;
+        let line_start = src[stop..line_end].iter().rposition(|&b| b == b'\n').map_or(stop, |i| stop + i + 1);
+        end = line_end;
+        let line = src[line_start..line_end].trim_ascii();
+        match line.last() {
+            None => continue,
+            _ if line.starts_with(b"//") => continue,
+            Some(b'{') => return Kind::Type,
+            Some(b'(') => return Kind::Constant,
+            _ if line.contains(&b'=') => return Kind::Constant,
+            // A field such as `Name string`.
+            _ if line.iter().any(|b| b.is_ascii_whitespace()) => return Kind::Type,
+            _ => {}
+        }
+    }
+    Kind::Constant
+}
+
+/// Exported names: types in type positions, constants elsewhere, and qualified names such as
+/// `*http.Request` and `http.StatusOK`.
 fn go_hook(lx: &mut Lexer) -> bool {
     let ctx = &*lx.ctx;
     let start = ctx.pos;
+    if lx.pending().is_some() {
+        return false;
+    }
     let qualified = ctx.peek() == b'.';
+    // For `pkg.Name`, the start of `pkg`.
+    let mut q = start;
     let name = if qualified {
         if !ctx.peek_at(1).is_ascii_uppercase() {
             return false;
         }
-        let mut q = start;
         while q > 0 && is_ident(ctx.src[q - 1]) {
             q -= 1;
         }
-        if q == start || !go_type_position(ctx, q) {
+        if q == start || ctx.at(q.wrapping_sub(1)) == b'.' {
             return false;
         }
         start + 1
@@ -469,26 +605,52 @@ fn go_hook(lx: &mut Lexer) -> bool {
         start
     };
     let end = lx.scan_ident(name);
-    let after = ctx.next_non_space(end);
+    let next = ctx.skip_spaces_from(end);
+    let after = ctx.at(next);
     if after == b'(' {
         return false;
     }
-    let kind = if qualified || ctx.at(end) == b'{' {
+    let alone = matches!(after, b'\n' | b'\r' | b'/' | 0) && ctx.at_line_start(q);
+    let kind = if qualified {
+        if go_type_position(ctx, q) || ctx.at(end) == b'{' {
+            Kind::Type
+        } else if alone {
+            // Embedded types such as `sync.Mutex`.
+            go_block_member(ctx, q)
+        } else if GO_PACKAGES.contains(&&ctx.src[q..start]) {
+            Kind::Constant
+        } else {
+            return false;
+        }
+    } else if ctx.at(end) == b'{' {
         Kind::Type
     } else if ctx.at_line_start(start) && (is_ident_start(after) || matches!(after, b'*' | b'[')) {
         // Struct fields (`Name string`), type specs in a `type (...)` block,
-        // and const specs (`Admin Role = iota`) which stay plain.
+        // and const specs (`Admin Role = iota`).
         let ty = ctx.skip_spaces_from(end);
         let ty_end = lx.scan_ident(ty);
         match &ctx.src[ty..ty_end] {
             b"struct" | b"interface" => Kind::Type,
-            _ if ty_end > ty && ctx.next_non_space(ty_end) == b'=' => return false,
+            _ if ty_end > ty && ctx.next_non_space(ty_end) == b'=' => Kind::Constant,
             _ => Kind::Property,
         }
     } else if go_type_position(ctx, start) {
         Kind::Type
+    } else if alone {
+        go_block_member(ctx, start)
+    } else if after == b':'
+        && !matches!(ctx.at(next + 1), b'=' | b':')
+        && (ctx.at_line_start(start)
+            || match ctx.prev_non_space(start) {
+                b'{' => true,
+                b',' => matches!(enclosing_open(ctx, start), Some((b'{', _))),
+                _ => false,
+            })
+    {
+        // Keys in composite literals: `User{Name: "x"}`, but not `case A, B:`.
+        Kind::Property
     } else {
-        return false;
+        Kind::Constant
     };
     let ctx = &mut *lx.ctx;
     if qualified {
@@ -560,7 +722,6 @@ const CS_TYPES: &[&str] = &[
 
 static CS_PLAIN: Str = Str::quoted("\"");
 static CS_VERBATIM: Str = Str::quoted("\"").raw().doubled().multiline();
-static CS_RAW: Str = Str::quoted("\"\"\"").raw().multiline();
 
 /// Interpolated `$"..."`, verbatim `@"..."` and raw `$"""..."""` strings, and `@name` identifiers.
 fn csharp_string(lx: &mut Lexer) -> bool {
@@ -584,23 +745,152 @@ fn csharp_string(lx: &mut Lexer) -> bool {
         }
         return false;
     }
-    let rule = if ctx.starts_with_at(i, b"\"\"\"") {
-        &CS_RAW
-    } else if verbatim {
-        &CS_VERBATIM
-    } else {
-        &CS_PLAIN
-    };
-    let interp = if dollars == 1 { Interp::Brace } else { Interp::None };
+    let raw = ctx.starts_with_at(i, b"\"\"\"");
     lx.ctx.pos = i;
+    if raw {
+        csharp_raw_string(lx, start, dollars);
+        return true;
+    }
+    let rule = if verbatim { &CS_VERBATIM } else { &CS_PLAIN };
+    let interp = if dollars == 1 { Interp::Brace } else { Interp::None };
     lx.string(start, rule, false, interp);
     true
+}
+
+/// Raw strings `"""..."""`, with as many quotes as they open with. With `dollars` leading `$`,
+/// a run of that many braces opens an interpolation and shorter runs are literal text.
+fn csharp_raw_string(lx: &mut Lexer, start: usize, dollars: usize) {
+    let ctx = &mut *lx.ctx;
+    let quotes = ctx.src[ctx.pos..].iter().take_while(|&&b| b == b'"').count();
+    ctx.pos += quotes;
+    let mut seg = start;
+    loop {
+        let ctx = &mut *lx.ctx;
+        let rest = &ctx.src[ctx.pos..];
+        let Some(p) = rest.iter().position(|&b| b == b'"' || (b == b'{' && dollars > 0)) else {
+            ctx.pos = ctx.len();
+            break;
+        };
+        let p = ctx.pos + p;
+        let run = ctx.src[p..].iter().take_while(|&&b| b == ctx.src[p]).count();
+        ctx.pos = p + run;
+        if ctx.src[p] == b'"' {
+            if run >= quotes {
+                break;
+            }
+            continue;
+        }
+        if run < dollars || !ctx.can_nest() {
+            continue;
+        }
+        // Extra braces before the hole are literal.
+        ctx.pos = p + run - dollars;
+        ctx.emit_from(seg, Kind::String);
+        ctx.token(dollars, Kind::Punctuation);
+        lx.nested(b'}');
+        let ctx = &mut *lx.ctx;
+        let close = ctx.src[ctx.pos..].iter().take(dollars).take_while(|&&b| b == b'}').count();
+        ctx.token(close, Kind::Punctuation);
+        seg = ctx.pos;
+    }
+    lx.ctx.emit_from(seg, Kind::String);
+    lx.mark_value();
+}
+
+/// Whether the `{` at `pos` opens an enum body: `enum Name {` or `enum Name : byte {`.
+fn enum_body(ctx: &Ctx, pos: usize) -> bool {
+    let src = ctx.src;
+    let back_ws = |mut i: usize| {
+        while i > 0 && src[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        i
+    };
+    let back_word = |mut i: usize| {
+        while i > 0 && is_ident(src[i - 1]) {
+            i -= 1;
+        }
+        i
+    };
+    let mut end = back_ws(pos);
+    let mut start = back_word(end);
+    let colon = back_ws(start);
+    if colon > 0 && src[colon - 1] == b':' && start < end {
+        end = back_ws(colon - 1);
+        start = back_word(end);
+    }
+    if start == end {
+        return false;
+    }
+    let kw = back_ws(start);
+    &src[back_word(kw)..kw] == b"enum"
+}
+
+/// Enum bodies: member names are constants. Gives up at `;` or `{`, which never appear in one.
+fn csharp_enum(lx: &mut Lexer) {
+    lx.ctx.token(1, Kind::Punctuation);
+    loop {
+        lx.ctx.skip_whitespace();
+        if lx.ctx.done() {
+            break;
+        }
+        let ctx = &mut *lx.ctx;
+        let start = ctx.pos;
+        match ctx.peek() {
+            b'}' => {
+                ctx.token(1, Kind::Punctuation);
+                break;
+            }
+            b';' | b'{' => break,
+            b'/' if ctx.peek_at(1) == b'/' => {
+                ctx.skip_line();
+                ctx.emit_from(start, Kind::Comment);
+            }
+            b'/' if ctx.peek_at(1) == b'*' => block_comment(ctx, "/*", "*/", false),
+            b'[' => {
+                if !bracket_attribute(lx) {
+                    lx.ctx.token(1, Kind::Punctuation);
+                }
+            }
+            b'"' => lx.string(start, &CS_PLAIN, false, Interp::None),
+            b'\'' => lx.string(start, &C_STRINGS[1], false, Interp::None),
+            b if b.is_ascii_digit() => {
+                scan_number(ctx, false);
+                ctx.emit_from(start, Kind::Number);
+            }
+            b if is_ident_start(b) => {
+                let end = lx.scan_ident(start);
+                let kind = if start > 0 && lx.ctx.src[start - 1] == b'.' {
+                    Kind::Property
+                } else {
+                    lx.word_kind(&lx.ctx.src[start..end]).unwrap_or(Kind::Constant)
+                };
+                lx.ctx.pos = end;
+                lx.ctx.emit(start, end, kind);
+            }
+            b',' | b'(' | b')' | b'.' => ctx.token(1, Kind::Punctuation),
+            b if b.is_ascii_punctuation() => ctx.token(1, Kind::Operator),
+            _ => ctx.bump_char(),
+        }
+    }
+    lx.mark_value();
 }
 
 fn csharp_hook(lx: &mut Lexer) -> bool {
     match lx.ctx.peek() {
         b'[' => bracket_attribute(lx),
         b'$' | b'@' => csharp_string(lx),
+        b'"' if lx.ctx.starts_with(b"\"\"\"") => {
+            csharp_raw_string(lx, lx.ctx.pos, 0);
+            true
+        }
+        b'{' => {
+            if !enum_body(lx.ctx, lx.ctx.pos) {
+                return false;
+            }
+            csharp_enum(lx);
+            true
+        }
         _ => pascal_member(lx, CS_TYPES),
     }
 }
@@ -608,7 +898,7 @@ fn csharp_hook(lx: &mut Lexer) -> bool {
 static CSHARP_SPEC: Spec = Spec {
     line_comments: &["//"],
     block_comments: &[("/*", "*/")],
-    strings: &[CS_RAW, CS_PLAIN, Str::quoted("'")],
+    strings: &[CS_PLAIN, Str::quoted("'")],
     keywords: &[
         "abstract", "and", "as", "async", "await", "base", "break", "case", "catch", "checked", "const", "continue",
         "default", "delegate", "do", "else", "event", "explicit", "extern", "file", "finally", "fixed", "for",
@@ -624,7 +914,7 @@ static CSHARP_SPEC: Spec = Spec {
     type_keywords: &["class", "struct", "interface", "enum", "record", "new"],
     features: CALLS | CAPITALIZED_TYPES | MEMBERS | PREPROCESSOR,
     hook: Some(csharp_hook),
-    hook_chars: "$@[ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    hook_chars: "\"$@[{ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     ..Spec::DEFAULT
 };
 
@@ -667,36 +957,99 @@ pub static KOTLIN: Definition = Definition::new("kotlin", "Kotlin", Engine::Gene
 
 // Swift
 
-/// Raw strings `#"..."#`, directives such as `#if` and `#selector`, and closure arguments `$0`.
+/// Raw strings `#"..."#` close with `"` and the same number of hashes; `\#(x)` interpolates
+/// and `\#n` escapes.
+fn swift_raw_string(lx: &mut Lexer, start: usize, hashes: usize) {
+    let mut seg = start;
+    loop {
+        let ctx = &mut *lx.ctx;
+        let Some(p) = ctx.src[ctx.pos..].iter().position(|&b| b == b'"' || b == b'\\') else {
+            ctx.pos = ctx.len();
+            break;
+        };
+        let p = ctx.pos + p;
+        let marked = ctx.src[p + 1..].iter().take(hashes).take_while(|&&b| b == b'#').count() == hashes;
+        ctx.pos = p + 1;
+        if !marked {
+            continue;
+        }
+        if ctx.src[p] == b'"' {
+            ctx.pos = p + 1 + hashes;
+            break;
+        }
+        // `\#(` interpolation or `\#n` escape.
+        let after = p + 1 + hashes;
+        ctx.emit(seg, p, Kind::String);
+        if ctx.at(after) == b'(' && ctx.can_nest() {
+            ctx.pos = p;
+            ctx.token(hashes + 2, Kind::Punctuation);
+            lx.nested(b')');
+            if lx.ctx.peek() == b')' {
+                lx.ctx.token(1, Kind::Punctuation);
+            }
+        } else {
+            ctx.pos = after;
+            if ctx.peek() == b'u' && ctx.peek_at(1) == b'{' {
+                let close = ctx.src[after..].iter().take(12).position(|&b| b == b'}');
+                ctx.pos = close.map_or(after + 1, |c| after + c + 1);
+            } else if !ctx.done() {
+                ctx.bump_char();
+            }
+            ctx.emit_from(p, Kind::Escape);
+        }
+        seg = lx.ctx.pos;
+    }
+    lx.ctx.emit_from(seg, Kind::String);
+    lx.mark_value();
+}
+
+/// Raw strings `#"..."#`, directives such as `#if` and `#selector`, closure arguments `$0`,
+/// and all caps initializers such as `UUID()`.
 fn swift_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
-    if ctx.peek() == b'$' {
-        let end = lx.scan_ident(start + 1);
-        if end == start + 1 {
-            return false;
+    match ctx.peek() {
+        b'$' => {
+            let end = lx.scan_ident(start + 1);
+            if end == start + 1 {
+                return false;
+            }
+            lx.ctx.pos = end;
+            lx.ctx.emit(start, end, Kind::Variable);
+            lx.mark_value();
+            true
         }
-        lx.ctx.pos = end;
-        lx.ctx.emit(start, end, Kind::Variable);
-        lx.mark_value();
-        return true;
+        b'#' => {
+            let hashes = ctx.src[start..].iter().take_while(|&&b| b == b'#').count();
+            let i = start + hashes;
+            if ctx.at(i) == b'"' {
+                let quotes = if ctx.starts_with_at(i, b"\"\"\"") { 3 } else { 1 };
+                ctx.pos = i + quotes;
+                swift_raw_string(lx, start, hashes);
+                return true;
+            }
+            if hashes == 1 && is_ident_start(ctx.at(i)) {
+                let end = lx.scan_ident(i);
+                lx.ctx.pos = end;
+                lx.ctx.emit(start, end, Kind::Meta);
+                return true;
+            }
+            false
+        }
+        _ => {
+            // Swift functions are lowerCamelCase, so `URL(string:)` builds a type.
+            let end = lx.scan_ident(start);
+            let ctx = &*lx.ctx;
+            if ctx.at(end) != b'(' || end - start < 2 || lx.pending().is_some() || ctx.at(start.wrapping_sub(1)) == b'.'
+            {
+                return false;
+            }
+            lx.ctx.pos = end;
+            lx.ctx.emit(start, end, Kind::Type);
+            lx.mark_value();
+            true
+        }
     }
-    let hashes = ctx.src[start..].iter().take_while(|&&b| b == b'#').count();
-    let i = start + hashes;
-    if ctx.at(i) == b'"' {
-        let end = hashed_close(ctx, i + 1, hashes);
-        ctx.pos = end;
-        ctx.emit(start, end, Kind::String);
-        lx.mark_value();
-        return true;
-    }
-    if hashes == 1 && is_ident_start(ctx.at(i)) {
-        let end = lx.scan_ident(i);
-        lx.ctx.pos = end;
-        lx.ctx.emit(start, end, Kind::Meta);
-        return true;
-    }
-    false
 }
 
 static SWIFT_SPEC: Spec = Spec {
@@ -724,7 +1077,7 @@ static SWIFT_SPEC: Spec = Spec {
     type_keywords: &["class", "struct", "enum", "protocol", "extension", "actor", "typealias"],
     features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS | ANNOTATIONS,
     hook: Some(swift_hook),
-    hook_chars: "#$",
+    hook_chars: "#$ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     ..Spec::DEFAULT
 };
 
@@ -732,12 +1085,35 @@ pub static SWIFT: Definition = Definition::new("swift", "Swift", Engine::Generic
 
 // Scala
 
+const SCALA_STRINGS: &[Str] = &[Str::quoted("\"\"\"").raw().multiline(), Str::quoted("\"")];
+
+/// Interpolated strings `s"..."`, `f"..."`, `raw"..."` and custom ones such as `sql"..."`, then
+/// char literals and symbols.
+fn scala_hook(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let quote = ctx.pos;
+    if ctx.peek() == b'\'' {
+        return char_or_symbol(lx);
+    }
+    let mut start = quote;
+    while start > 0 && is_ident(ctx.src[start - 1]) {
+        start -= 1;
+    }
+    if start == quote || !is_ident_start(ctx.src[start]) {
+        return false;
+    }
+    let rule = &SCALA_STRINGS[if ctx.starts_with(b"\"\"\"") { 0 } else { 1 }];
+    let raw = &ctx.src[start..quote] == b"raw";
+    ctx.truncate_to(start);
+    lx.string(start, rule, raw, Interp::Dollar);
+    true
+}
+
 static SCALA_SPEC: Spec = Spec {
     line_comments: &["//"],
     block_comments: &[("/*", "*/")],
     nested_comments: true,
-    strings: &[Str::quoted("\"\"\"").raw().multiline(), Str::quoted("\"")],
-    string_prefixes: &[Prefix::interp(b's', Interp::Dollar), Prefix::interp(b'f', Interp::Dollar)],
+    strings: SCALA_STRINGS,
     keywords: &[
         "abstract", "case", "catch", "derives", "do", "else", "end", "export", "extends", "extension", "final",
         "finally", "for", "forSome", "given", "if", "implicit", "import", "inline", "lazy", "match", "new", "opaque",
@@ -750,8 +1126,8 @@ static SCALA_SPEC: Spec = Spec {
     function_keywords: &["def"],
     type_keywords: &["class", "trait", "object", "type", "enum"],
     features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS,
-    hook: Some(char_or_symbol),
-    hook_chars: "'",
+    hook: Some(scala_hook),
+    hook_chars: "'\"",
     ..Spec::DEFAULT
 };
 
@@ -760,32 +1136,18 @@ pub static SCALA: Definition =
 
 // Dart
 
-const DART_STRINGS: &[Str] = &[
-    Str::quoted("'''").multiline().interp(Interp::Dollar),
-    Str::quoted("\"\"\"").multiline().interp(Interp::Dollar),
-    Str::quoted("'").interp(Interp::Dollar),
-    Str::quoted("\"").interp(Interp::Dollar),
-];
-
-/// Raw strings `r'...'` have no escapes or interpolation.
-fn dart_hook(lx: &mut Lexer) -> bool {
-    let ctx = &*lx.ctx;
-    let start = ctx.pos;
-    match DART_STRINGS.iter().find(|r| ctx.starts_with_at(start + 1, r.open.as_bytes())) {
-        Some(rule) => {
-            lx.ctx.pos = start + 1;
-            lx.string(start, rule, true, Interp::None);
-            true
-        }
-        None => false,
-    }
-}
-
 static DART_SPEC: Spec = Spec {
     line_comments: &["//"],
     block_comments: &[("/*", "*/")],
     nested_comments: true,
-    strings: DART_STRINGS,
+    strings: &[
+        Str::quoted("'''").multiline().interp(Interp::Dollar),
+        Str::quoted("\"\"\"").multiline().interp(Interp::Dollar),
+        Str::quoted("'").interp(Interp::Dollar),
+        Str::quoted("\"").interp(Interp::Dollar),
+    ],
+    // Raw strings `r'...'` have no escapes or interpolation.
+    string_prefixes: &[Prefix::raw(b'r')],
     keywords: &[
         "abstract", "as", "assert", "async", "await", "base", "break", "case", "catch", "const", "continue",
         "covariant", "default", "deferred", "do", "dynamic", "else", "export", "extends", "external", "factory",
@@ -799,8 +1161,6 @@ static DART_SPEC: Spec = Spec {
     constants: &["true", "false", "null"],
     type_keywords: &["class", "mixin", "enum", "extension", "typedef"],
     features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS | ANNOTATIONS,
-    hook: Some(dart_hook),
-    hook_chars: "r",
     ..Spec::DEFAULT
 };
 
@@ -814,50 +1174,84 @@ const OBJC_AT_KEYWORDS: &[&[u8]] = &[
     b"import", b"synchronized", b"public", b"private", b"protected", b"package", b"available",
 ];
 
-/// `@keywords`, `@"strings"` and selector parts in messages and method declarations.
+/// `@keywords`, `@"strings"` and selector parts in messages and method declarations. Selector
+/// names are found at the `:`, `]` or `)` after them and re-kinded.
 fn objc_hook(lx: &mut Lexer) -> bool {
     let ctx = &*lx.ctx;
     let start = ctx.pos;
     let src = ctx.src;
-    if ctx.peek() == b'@' {
-        if ctx.peek_at(1) == b'"' {
-            lx.ctx.pos += 1;
-            lx.string(start, &C_STRINGS[0], false, Interp::None);
-            return true;
+    match ctx.peek() {
+        b'@' => {
+            if ctx.peek_at(1) == b'"' {
+                lx.ctx.pos += 1;
+                lx.string(start, &C_STRINGS[0], false, Interp::None);
+                return true;
+            }
+            let end = lx.scan_ident(start + 1);
+            if !OBJC_AT_KEYWORDS.contains(&&src[start + 1..end]) {
+                return false;
+            }
+            lx.ctx.pos = end;
+            lx.ctx.emit(start, end, Kind::Keyword);
+            true
         }
-        let end = lx.scan_ident(start + 1);
-        if !OBJC_AT_KEYWORDS.contains(&&src[start + 1..end]) {
-            return false;
-        }
-        lx.ctx.pos = end;
-        lx.ctx.emit(start, end, Kind::Keyword);
-        return true;
-    }
-    let end = lx.scan_ident(start);
-    let selector = if ctx.at(end) == b':' {
-        // `setName:` in a message or declaration, but not `case X:` or `default:`.
-        ctx.at(end + 1) != b':' && &src[start..end] != b"default" && word_before(ctx, start) != b"case"
-    } else if ctx.next_non_space(end) == b']' {
-        // `[receiver message]`
-        let p = ctx.prev_non_space(start);
-        start > 0 && matches!(src[start - 1], b' ' | b'\t' | b'\n') && (is_ident(p) || p == b']' || p == b')')
-    } else {
-        // `- (void)viewDidLoad`: the name right after the return type.
-        let i = ctx.skip_spaces_from(line_start(ctx, start));
-        if matches!(ctx.at(i), b'-' | b'+') && ctx.next_non_space(i + 1) == b'(' {
-            let close = ctx.src[i..start].iter().position(|&b| b == b')');
-            close.is_some_and(|p| ctx.skip_spaces_from(i + p + 1) == start)
-        } else {
+        b':' => {
+            // `setName:` in a message or declaration, but not `case X:`, `default:` or `a ? b : c`.
+            let mut name = start;
+            while name > 0 && is_ident(src[name - 1]) {
+                name -= 1;
+            }
+            let word = &src[name..start];
+            if name < start && ctx.peek_at(1) != b':' && word != b"default" && word_before(ctx, name) != b"case" {
+                lx.ctx.truncate_to(name);
+                lx.ctx.emit(name, start, Kind::Function);
+            }
             false
         }
-    };
-    if !selector {
-        return false;
+        b']' => {
+            // `[receiver message]`
+            let mut end = start;
+            while end > 0 && matches!(src[end - 1], b' ' | b'\t') {
+                end -= 1;
+            }
+            let name = end - word_before(ctx, end).len();
+            let p = ctx.prev_non_space(name);
+            if name < end
+                && matches!(ctx.at(name.wrapping_sub(1)), b' ' | b'\t' | b'\n')
+                && is_ident_start(src[name])
+                && (is_ident(p) || p == b']' || p == b')')
+            {
+                lx.ctx.truncate_to(name);
+                lx.ctx.emit(name, end, Kind::Function);
+            }
+            false
+        }
+        _ => {
+            // `- (void)viewDidLoad`: the name right after the return type.
+            let Some(open) = src[start.saturating_sub(64)..start].iter().rposition(|&b| b == b'(' || b == b')') else {
+                return false;
+            };
+            let open = start.saturating_sub(64) + open;
+            let mut sign = open;
+            while sign > 0 && matches!(src[sign - 1], b' ' | b'\t') {
+                sign -= 1;
+            }
+            if src[open] != b'(' || !matches!(ctx.at(sign.wrapping_sub(1)), b'-' | b'+') || !ctx.at_line_start(sign - 1)
+            {
+                return false;
+            }
+            let name = ctx.skip_spaces_from(start + 1);
+            if !is_ident_start(ctx.at(name)) {
+                return false;
+            }
+            let end = lx.scan_ident(name);
+            lx.ctx.token(1, Kind::Punctuation);
+            lx.ctx.pos = end;
+            lx.ctx.emit(name, end, Kind::Function);
+            lx.mark_value();
+            true
+        }
     }
-    lx.ctx.pos = end;
-    lx.ctx.emit(start, end, Kind::Function);
-    lx.mark_value();
-    true
 }
 
 static OBJC_SPEC: Spec = Spec {
@@ -881,7 +1275,7 @@ static OBJC_SPEC: Spec = Spec {
     type_keywords: &["struct", "enum", "union"],
     features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PREPROCESSOR,
     hook: Some(objc_hook),
-    hook_chars: "@abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
+    hook_chars: "@:])",
     ..Spec::DEFAULT
 };
 
@@ -968,6 +1362,76 @@ pub static ZIG: Definition = Definition::new("zig", "Zig", Engine::Generic(&ZIG_
 
 // D
 
+/// Token strings `q{...}` and delimited strings `q"(...)"`, `q"/.../"`, `q"EOS ... EOS"`.
+fn d_hook(lx: &mut Lexer) -> bool {
+    let ctx = &*lx.ctx;
+    let start = ctx.pos;
+    let src = ctx.src;
+    let open = ctx.peek_at(2);
+    let end = match ctx.peek_at(1) {
+        b'{' => bracket_close(src, start + 1, b'{', b'}', true).map(|p| p + 1),
+        b'"' => match open {
+            b'(' | b'[' | b'{' | b'<' => {
+                let close = match open {
+                    b'(' => b')',
+                    b'[' => b']',
+                    b'{' => b'}',
+                    _ => b'>',
+                };
+                bracket_close(src, start + 2, open, close, false).map(|p| p + 1)
+            }
+            b if is_ident_start(b) => {
+                // Heredoc: the identifier ends the string at the start of a line.
+                let id_end = lx.scan_ident(start + 2);
+                let id = &src[start + 2..id_end];
+                let mut from = id_end;
+                loop {
+                    match ctx.find(from, id) {
+                        Some(p) if src[p - 1] == b'\n' && ctx.at(p + id.len()) == b'"' => break Some(p + id.len()),
+                        Some(p) => from = p + 1,
+                        None => break None,
+                    }
+                }
+            }
+            0 | b'\n' | b' ' => return false,
+            _ => ctx.find(start + 3, &[open, b'"']).map(|p| p + 1),
+        },
+        _ => return false,
+    };
+    let ctx = &mut *lx.ctx;
+    // Skip the closing quote and an optional `c`, `w` or `d` suffix.
+    let mut end = end.map_or(ctx.len(), |e| e + usize::from(ctx.at(start + 1) == b'"' && ctx.at(e) == b'"'));
+    if matches!(ctx.at(end), b'c' | b'w' | b'd') && !is_ident(ctx.at(end + 1)) {
+        end += 1;
+    }
+    ctx.pos = end;
+    ctx.emit(start, end, Kind::String);
+    lx.mark_value();
+    true
+}
+
+/// Offset of the `close` that balances the `open` at `from`, skipping `"strings"` if `tokens`.
+fn bracket_close(src: &[u8], from: usize, open: u8, close: u8, tokens: bool) -> Option<usize> {
+    let (mut depth, mut quoted) = (0usize, false);
+    let mut i = from;
+    while i < src.len() {
+        match src[i] {
+            b'\\' if quoted => i += 1,
+            b'"' if tokens => quoted = !quoted,
+            b if quoted || (b != open && b != close) => {}
+            b if b == open => depth += 1,
+            _ => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 static D_SPEC: Spec = Spec {
     line_comments: &["//"],
     block_comments: &[("/*", "*/"), ("/+", "+/")],
@@ -991,6 +1455,8 @@ static D_SPEC: Spec = Spec {
     constants: &["true", "false", "null", "__FILE__", "__LINE__"],
     type_keywords: &["class", "struct", "interface", "enum", "union", "template"],
     features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS | BANG_MACROS,
+    hook: Some(d_hook),
+    hook_chars: "q",
     ..Spec::DEFAULT
 };
 
@@ -1266,21 +1732,28 @@ fn odin_hook(lx: &mut Lexer) -> bool {
         }
         return true;
     }
-    let end = lx.scan_ident(start);
-    let i = ctx.skip_spaces_from(end);
-    if ctx.at(i) != b':' || ctx.at(i + 1) != b':' {
+    // At `::`: re-kind the name before it.
+    if ctx.peek_at(1) != b':' {
         return false;
     }
-    let j = ctx.skip_spaces_from(i + 2);
+    let mut end = start;
+    while end > 0 && matches!(ctx.src[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    let mut name = end;
+    while name > 0 && is_ident(ctx.src[name - 1]) {
+        name -= 1;
+    }
+    let j = ctx.skip_spaces_from(start + 2);
     let kind = match &ctx.src[j..lx.scan_ident(j)] {
+        _ if name == end => return false,
         b"proc" => Kind::Function,
         b"struct" | b"enum" | b"union" | b"distinct" | b"bit_set" => Kind::Type,
         _ => return false,
     };
-    lx.ctx.pos = end;
-    lx.ctx.emit(start, end, kind);
-    lx.mark_value();
-    true
+    lx.ctx.truncate_to(name);
+    lx.ctx.emit(name, end, kind);
+    false
 }
 
 static ODIN_SPEC: Spec = Spec {
@@ -1303,7 +1776,7 @@ static ODIN_SPEC: Spec = Spec {
     sigils: &[(b'#', Kind::Meta)],
     features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS,
     hook: Some(odin_hook),
-    hook_chars: "@abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
+    hook_chars: "@:",
     ..Spec::DEFAULT
 };
 

@@ -45,9 +45,45 @@ fn go_exported_names() {
     assert_not("go", code, "ErrClosed", Type);
     assert_tokens("go", "type User struct {\n\tName string `json:\"name\"`\n}", &[("User", Type), ("Name", Property)]);
     assert_tokens("go", "u := &User{Name: \"x\"}; fmt.Println(u)", &[("User", Type), ("Println", Function)]);
-    assert_tokens("go", "w.WriteHeader(http.StatusOK)", &[("WriteHeader", Function), ("StatusOK", Property)]);
-    assert_tokens("go", "func Map[T any](xs []T) []T", &[("Map", Function), ("any", Type), ("T", Type)]);
+    assert_tokens("go", "w.WriteHeader(http.StatusOK)", &[("WriteHeader", Function), ("StatusOK", Constant)]);
+    assert_tokens("go", "func Map[T any](xs []T) []T", &[("Map", Function), ("T", Type), ("any", Type), ("T", Type)]);
     assert_tokens("go", "s := `raw \\n` + \"a\\tb\"", &[("`raw \\n`", String), ("\\t", Escape)]);
+}
+
+#[test]
+fn go_constants_and_packages() {
+    assert_tokens(
+        "go",
+        "const MaxUsers = 10\nvar ErrNotFound = errors.New(\"x\")\nreturn nil, ErrNotFound",
+        &[("MaxUsers", Constant), ("ErrNotFound", Constant), ("New", Function), ("ErrNotFound", Constant)],
+    );
+    assert_tokens(
+        "go",
+        "const (\n\tAdmin Role = iota\n\tGuest\n)",
+        &[("Admin", Constant), ("Role", Type), ("Guest", Constant)],
+    );
+    assert_tokens(
+        "go",
+        "type Base struct {\n\tsync.Mutex\n\tEmbedded\n\tName string\n}",
+        &[("Mutex", Type), ("Embedded", Type), ("Name", Property)],
+    );
+    assert_tokens(
+        "go",
+        "u := &User{Name: \"x\", Role: Admin}\nswitch r {\ncase Admin, Guest:\n}",
+        &[("User", Type), ("Name", Property), ("Role", Property), ("Admin", Constant), ("Guest", Constant)],
+    );
+    assert_tokens(
+        "go",
+        "var c = http.DefaultClient\nvar h http.Handler\nd := 5*time.Second\nxs := []*User{}",
+        &[("DefaultClient", Constant), ("Handler", Type), ("Second", Constant), ("User", Type)],
+    );
+    // A lowercase name that is not a known package is a value with fields.
+    assert_tokens("go", "u.Name = req.Header", &[("Name", Property), ("Header", Property)]);
+    assert_tokens(
+        "go",
+        "func f(g func(T) U) (U, error) { v := x.(Stringer); p := new(Point) }",
+        &[("T", Type), ("U", Type), ("U", Type), ("Stringer", Type), ("Point", Type)],
+    );
 }
 
 #[test]
@@ -82,9 +118,67 @@ fn csharp_strings() {
     );
     assert_tokens("csharp", "var p = @\"C:\\dir\\\"\"x\"\"\";", &[("@\"C:\\dir\\\"\"x\"\"\"", String)]);
     assert_tokens("csharp", "var r = \"\"\"\n  {\"a\": 1}\n  \"\"\";", &[("\"\"\"\n  {\"a\": 1}\n  \"\"\"", String)]);
-    assert_tokens("csharp", "var j = $$\"\"\"{\"id\": {{id}}}\"\"\";", &[("$$\"\"\"{\"id\": {{id}}}\"\"\"", String)]);
+    assert_tokens(
+        "csharp",
+        "var j = $$\"\"\"{\"id\": {{id}}, \"n\": {{{Name}}}}\"\"\";",
+        &[
+            ("$$\"\"\"{\"id\": ", String),
+            ("{{", Punctuation),
+            ("id", Text),
+            ("}}", Punctuation),
+            (", \"n\": {", String),
+            ("{{", Punctuation),
+            ("Name", Property),
+            ("}}", Punctuation),
+            ("}}\"\"\"", String),
+        ],
+    );
+    assert_tokens("csharp", "var r = \"\"\"\" a \"\"\" b \"\"\"\";", &[("\"\"\"\" a \"\"\" b \"\"\"\"", String)]);
+    assert_tokens("csharp", "var s = $\"{Total:C2}\";", &[("Total", Property), ("C2", String)]);
     assert_tokens("csharp", "var @class = 1;", &[("var", Type)]);
     assert_not("csharp", "var @class = 1;", "class", Keyword);
+}
+
+#[test]
+fn csharp_values_and_enums() {
+    assert_tokens(
+        "csharp",
+        "var s = $\"{Id} {Name,10}\"; return (Id, Name);",
+        &[("Id", Property), ("Name", Property), ("Id", Property), ("Name", Property)],
+    );
+    assert_tokens(
+        "csharp",
+        "if (Done) Run(Count, Limit); var t = (Id: 1, Name: \"x\"); x = Ok ? First : Last;",
+        &[
+            ("Done", Property),
+            ("Count", Property),
+            ("Limit", Property),
+            ("Id", Property),
+            ("Name", Property),
+            ("First", Property),
+            ("Last", Property),
+        ],
+    );
+    assert_tokens(
+        "csharp",
+        "Dictionary<Foo, Bar> d; class A : IA, IB { } var c = (Foo)y; var t = typeof(Foo);",
+        &[("Foo", Type), ("Bar", Type), ("IA", Type), ("IB", Type), ("Foo", Type), ("Foo", Type)],
+    );
+    assert_tokens(
+        "csharp",
+        "enum Color : byte\n{\n    // warm\n    Red,\n    Green = 2,\n    Both = Red | Green\n}",
+        &[
+            ("Color", Type),
+            ("byte", Type),
+            ("// warm", Comment),
+            ("Red", Constant),
+            ("Green", Constant),
+            ("2", Number),
+            ("Both", Constant),
+            ("Red", Constant),
+        ],
+    );
+    assert_tokens("csharp", "var xs = new[] { Red, Green };", &[("Red", Property), ("Green", Property)]);
 }
 
 #[test]
@@ -144,6 +238,13 @@ fn swift_features() {
     );
     assert_tokens("swift", "let r = #\"a \"b\" \\d\"#", &[("#\"a \"b\" \\d\"#", String)]);
     assert_tokens("swift", "xs.map { $0 * 2 }", &[("$0", Variable)]);
+    assert_tokens(
+        "swift",
+        "let r = #\"\\d \\#(user.name)\\#n\"#",
+        &[("#\"\\d ", String), ("\\#(", Punctuation), ("name", Property), ("\\#n", Escape), ("\"#", String)],
+    );
+    assert_tokens("swift", "let s = ##\"\"\"\n\"# x\n\"\"\"##", &[("##\"\"\"\n\"# x\n\"\"\"##", String)]);
+    assert_tokens("swift", "let id = UUID(); let u = URL(string: s)", &[("UUID", Type), ("URL", Type)]);
 }
 
 #[test]
@@ -154,6 +255,19 @@ fn scala_interpolation_and_chars() {
         &[("s\"total ", String), ("$n", Variable), ("size", Property), ("'x'", String), ("'tag", Constant)],
     );
     assert_tokens("scala", "def apply[A](x: A): Option[A] = Some(x)", &[("apply", Function), ("Option", Type)]);
+    assert_tokens(
+        "scala",
+        "val p = raw\"C:\\n$dir\"; val q = sql\"id = ${id}\"; val t = s\"\"\"a $b\"\"\"",
+        &[("raw\"C:\\n", String), ("$dir", Variable), ("sql\"id = ", String), ("${", Punctuation), ("$b", Variable)],
+    );
+    assert_not("scala", "val p = raw\"C:\\n$dir\"", "\\n", Escape);
+}
+
+#[test]
+fn dollar_interpolation_skips_parens() {
+    for lang in ["kotlin", "groovy", "dart"] {
+        assert_tokens(lang, "x = \"a $(b) $c\"", &[("\"a $(b) ", String), ("$c", Variable)]);
+    }
 }
 
 #[test]
@@ -161,6 +275,7 @@ fn dart_strings() {
     assert_tokens("dart", "print('Hi $name ${a.b}');", &[("$name", Variable), ("b", Property)]);
     assert_tokens("dart", "final p = r'C:\\$dir';", &[("r'C:\\$dir'", String)]);
     assert_not("dart", "final p = r'C:\\$dir';", "$dir", Variable);
+    assert_tokens("dart", "final q = r\"\"\"a\n$b\"\"\";", &[("r\"\"\"a\n$b\"\"\"", String)]);
 }
 
 #[test]
@@ -178,6 +293,13 @@ fn objective_c_messages() {
     );
     assert_tokens("objective-c", "- (void)dealloc {", &[("dealloc", Function)]);
     assert_tokens("objective-c", "switch (x) { case FOO: break; default: break; }", &[("FOO", Constant)]);
+    assert_tokens(
+        "objective-c",
+        "+ (instancetype)shared;\n[self.view addSubview:v];\nint y = a ? b : c; if (f(x)) {}",
+        &[("shared", Function), ("view", Property), ("addSubview", Function), ("f", Function)],
+    );
+    assert_not("objective-c", "int y = a ? b : c;", "b", Function);
+    assert_not("objective-c", "[self.view addSubview:v];", "v", Function);
 }
 
 #[test]
@@ -196,6 +318,17 @@ fn d_and_groovy() {
         "d",
         "/+ a /+ b +/ c +/ auto x = to!string(1);",
         &[("/+ a /+ b +/ c +/", Comment), ("to!", Function)],
+    );
+    assert_tokens(
+        "d",
+        "auto a = q{ x = \"}\"; { y } }; auto b = q\"(a (b))\" ~ q\"/c/\" ~ q\"EOS\nEOS x\nEOS\"; auto queue = 1;",
+        &[
+            ("q{ x = \"}\"; { y } }", String),
+            ("q\"(a (b))\"", String),
+            ("q\"/c/\"", String),
+            ("q\"EOS\nEOS x\nEOS\"", String),
+            ("auto", Keyword),
+        ],
     );
     assert_tokens(
         "groovy",
