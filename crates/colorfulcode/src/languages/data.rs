@@ -1729,13 +1729,15 @@ fn http_text(ctx: &mut Ctx, end: usize, kind: Kind) {
     let mut seg = ctx.pos;
     while ctx.pos < end {
         if ctx.starts_with(b"{{") {
-            if let Some(close) = ctx.find_in(ctx.pos + 2, end, b"}}") {
-                ctx.emit_from(seg, kind);
-                ctx.emit(ctx.pos, close + 2, Kind::Variable);
-                ctx.pos = close + 2;
-                seg = ctx.pos;
-                continue;
-            }
+            // Without a `}}` here no later `{{` can have one either.
+            let Some(close) = ctx.find_in(ctx.pos + 2, end, b"}}") else {
+                break;
+            };
+            ctx.emit_from(seg, kind);
+            ctx.emit(ctx.pos, close + 2, Kind::Variable);
+            ctx.pos = close + 2;
+            seg = ctx.pos;
+            continue;
         }
         ctx.pos += 1;
     }
@@ -2261,13 +2263,14 @@ fn mermaid_hook(lx: &mut Lexer) -> bool {
     }
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
-    let line_end = ctx.line_end_within(start, 4096);
+    // Labels longer than this are left to the generic rules.
+    let line_end = ctx.line_end_within(start, 512);
     match ctx.peek() {
         b'%' => {
             if !ctx.starts_with(b"%%{") {
                 return false;
             }
-            let end = ctx.find_in(start, start + 65536, b"}%%").map_or(line_end, |p| p + 3);
+            let end = ctx.find_in(start, start + 1024, b"}%%").map_or(line_end, |p| p + 3);
             ctx.pos = end;
             ctx.emit(start, end, Kind::Meta);
         }
@@ -2383,7 +2386,7 @@ fn mermaid_link(lx: &mut Lexer) -> bool {
     // The target follows, perhaps after a `|label|` or an activation `+`.
     let mut next = ctx.skip_spaces_from(end);
     if ctx.at(next) == b'|' {
-        let line_end = ctx.line_end_within(next + 1, 1024);
+        let line_end = ctx.line_end_within(next + 1, 512);
         next = ctx.src[next + 1..line_end].iter().position(|&b| b == b'|').map_or(next, |i| next + i + 2);
         next = ctx.skip_spaces_from(next);
     }
@@ -2426,7 +2429,6 @@ pub static MERMAID: Definition = Definition::new("mermaid", "Mermaid", Engine::G
 fn plantuml_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
-    let line_end = ctx.line_end_within(start, 4096);
     match ctx.peek() {
         b'#' => {
             let mut end = start + 1;
@@ -2445,23 +2447,25 @@ fn plantuml_hook(lx: &mut Lexer) -> bool {
             while before > 0 && matches!(ctx.src[before - 1], b' ' | b'\t') {
                 before -= 1;
             }
-            let close = ctx.src[start..line_end].iter().position(|&b| b == b'>');
-            match close {
-                Some(c) if ctx.src[..before].ends_with(b"!include") => {
-                    ctx.pos = start + c + 1;
-                    ctx.emit(start, ctx.pos, Kind::String);
-                }
-                _ => return false,
+            if !ctx.src[..before].ends_with(b"!include") {
+                return false;
             }
+            let line_end = ctx.line_end_within(start, 1024);
+            let Some(close) = ctx.src[start..line_end].iter().position(|&b| b == b'>') else {
+                return false;
+            };
+            ctx.pos = start + close + 1;
+            ctx.emit(start, ctx.pos, Kind::String);
         }
         b'<' => {
-            let Some(close) = ctx.find_in(start + 2, line_end, b">>") else {
+            let Some(close) = ctx.find_in(start + 2, ctx.line_end_within(start, 256), b">>") else {
                 return false;
             };
             ctx.pos = close + 2;
             ctx.emit(start, ctx.pos, Kind::Meta);
         }
         b':' if ctx.at_line_start(start) => {
+            let line_end = ctx.line_end_within(start, 4096);
             let close =
                 ctx.src[start..line_end].iter().position(|&b| matches!(b, b';' | b'|' | b'<')).map(|i| start + i);
             let text_end = close.unwrap_or(line_end);
@@ -2473,6 +2477,7 @@ fn plantuml_hook(lx: &mut Lexer) -> bool {
             }
         }
         b':' if matches!(ctx.peek_at(1), b' ' | b'\t') => {
+            let line_end = ctx.line_end_within(start, 4096);
             let text = ctx.skip_spaces_from(start + 1);
             ctx.emit(start, start + 1, Kind::Punctuation);
             ctx.emit(text, trim_end(ctx.src, text, line_end), Kind::String);
@@ -2710,7 +2715,7 @@ fn regex_body(ctx: &mut Ctx, end: usize) {
                     class = None;
                 }
                 b'[' if ctx.peek_at(1) == b':' => {
-                    let close = ctx.find_in(start + 2, end, b":]").map_or(start + 1, |c| c + 2);
+                    let close = ctx.find_in(start + 2, end.min(start + 16), b":]").map_or(start + 1, |c| c + 2);
                     ctx.pos = close;
                     ctx.emit_from(start, Kind::Builtin);
                 }
