@@ -17,9 +17,9 @@
 
 ## Why
 
-- **Fast.** Around 240 MB/s natively and 45 MB/s from JavaScript including HTML output. That is 11 to 33 times faster than Prism and highlight.js and over 100 times faster than Shiki ([benchmarks](#benchmarks)).
+- **Fast.** Around 210 MB/s natively and 35 to 45 MB/s from JavaScript including HTML output. That is 11 to 27 times faster than Prism and highlight.js and over 100 times faster than Shiki ([benchmarks](#benchmarks)).
 - **Lots of languages.** 200 languages, including embedded ones: scripts and styles in HTML, fenced code in Markdown, Vue and Svelte components, and TSX with generic arrow functions.
-- **Small for what it does.** All 200 languages are 341 KiB gzipped, and the 55 most used ones are 161 KiB (`colorfulcode/common`). No dependencies.
+- **Small for what it does.** All 200 languages are 349 KiB gzipped, and the 55 most used ones are 169 KiB (`colorfulcode/common`). No dependencies.
 - **Zero setup.** Synchronous, so it works in SSR, React Server Components, Node, Deno, Bun and every bundler without configuration.
 - **Easy to render anywhere.** The output is a flat list of `(start, end, kind)` tokens plus theme colors, so native UIs can colorize text in a few lines.
 
@@ -81,7 +81,7 @@ const tokens = tokenize("const answer = 42;", "js");
 | `defineTheme(theme)` | Registers a [custom theme](#custom-themes) and returns its name. |
 | `themeCss(theme, selector?)` | CSS for class based output. Also shipped as `colorfulcode/css/<name>.css`. |
 
-Unknown languages fall back to plain text. Pass `"auto"` as the language to guess it from the code first (plain text when unsure). Guessing only happens when asked for and takes well under a millisecond.
+Unknown languages fall back to plain text. Pass `"auto"` as the language to guess it from the code first (plain text when unsure). Guessing only happens when asked for and takes well under a millisecond. It is reliable on whole files but only a best effort on snippets of a few lines, so pass the language whenever you know it.
 
 ## Rust
 
@@ -228,7 +228,7 @@ Native apps usually skip themes altogether and map each kind to colors from thei
 
 ## Smaller build
 
-`colorfulcode` includes every language (341 KiB gzipped). If you only need the popular ones, `colorfulcode/common` has 55 of them (161 KiB gzipped) with the same API:
+`colorfulcode` includes every language (349 KiB gzipped). If you only need the popular ones, `colorfulcode/common` has 55 of them (169 KiB gzipped) with the same API:
 
 ```js
 import { highlight } from "colorfulcode/common";
@@ -248,12 +248,12 @@ In Node 22, HTML output for about 100 KB of code per language (`bench/compare.mj
 
 | Language | colorfulcode | Prism | highlight.js | Shiki |
 | --- | ---: | ---: | ---: | ---: |
-| TypeScript | **44.7 MB/s** | 1.9 MB/s (24x slower) | 1.3 MB/s (33x slower) | 0.2 MB/s (211x slower) |
-| Python | **54.1 MB/s** | 3.5 MB/s (15x slower) | 4.5 MB/s (12x slower) | 0.4 MB/s (155x slower) |
-| Rust | **43.1 MB/s** | 2.4 MB/s (18x slower) | 3.2 MB/s (14x slower) | 0.4 MB/s (120x slower) |
-| CSS | **44.9 MB/s** | 4.2 MB/s (11x slower) | 2.9 MB/s (15x slower) | 0.3 MB/s (144x slower) |
+| TypeScript | **38.4 MB/s** | 1.7 MB/s (23x slower) | 1.4 MB/s (27x slower) | 0.2 MB/s (182x slower) |
+| Python | **45.7 MB/s** | 3.5 MB/s (13x slower) | 4.0 MB/s (11x slower) | 0.4 MB/s (121x slower) |
+| Rust | **36.5 MB/s** | 2.0 MB/s (18x slower) | 3.2 MB/s (11x slower) | 0.3 MB/s (110x slower) |
+| CSS | **44.8 MB/s** | 4.2 MB/s (11x slower) | 3.1 MB/s (15x slower) | 0.3 MB/s (137x slower) |
 
-The core alone tokenizes at 240 MB/s on average across all sample files (`cargo run --release --example bench`).
+The core alone tokenizes at 210 MB/s on average across all sample files (`cargo run --release --example bench`).
 
 ## Languages
 
