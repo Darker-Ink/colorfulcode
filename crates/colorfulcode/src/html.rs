@@ -39,7 +39,9 @@ pub fn render(code: &str, tokens: &[Token], options: &Options) -> String {
             None => out.push_str("<pre class=\"cc\"><code>"),
         }
     }
-    let gutter = if options.line_numbers { digits(code.bytes().filter(|&b| b == b'\n').count() + 1) } else { 0 };
+    // A final line break ends the last line rather than starting an empty one.
+    let body = if lines { code.strip_suffix('\n').unwrap_or(code) } else { code };
+    let gutter = if options.line_numbers { digits(body.bytes().filter(|&b| b == b'\n').count() + 1) } else { 0 };
     let mut writer = Writer::new(out, options, lines, gutter);
     if lines {
         writer.open_line();
@@ -55,10 +57,16 @@ pub fn render(code: &str, tokens: &[Token], options: &Options) -> String {
             end = tokens[i].end as usize;
             i += 1;
         }
-        writer.token(&code[start..end], group);
+        let end = end.min(body.len());
+        if start < end {
+            writer.token(&body[start..end], group);
+        }
     }
     if lines {
         writer.out.push_str("</span>");
+        if body.len() < code.len() {
+            writer.out.push('\n');
+        }
     }
     let mut out = writer.out;
     if options.wrap {

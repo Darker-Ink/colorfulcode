@@ -172,3 +172,14 @@ fn json_keys_are_properties() {
         &[("\"a\"", Property), ("\"b\"", String), ("true", Constant), ("1.5e3", Number)],
     );
 }
+
+#[test]
+fn html_lines() {
+    use colorfulcode::{highlight, html, Language};
+    let code = "a\nb\n";
+    let out = highlight(code, Language::plain()).to_html(&html::Options { line_numbers: true, ..Default::default() });
+    assert_eq!(
+        out,
+        "<span class=\"cc-line\"><span class=\"cc-ln\">1</span>a</span>\n<span class=\"cc-line\"><span class=\"cc-ln\">2</span>b</span>\n"
+    );
+}
