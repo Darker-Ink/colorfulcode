@@ -20,7 +20,8 @@ fn hook_fragments_never_panic() {
         ">", "->", "q(", "s{a}", "{a}", "<<~", "<<'", "<<E", "%w", "%(", "~r", "~S\"\"\"", "#`(", "=begin", "=cut",
         "[==[", "--[[", ":\"", "$#", "$", "@[", "@", "%", "&", "r\"", "raw\"", "'", "\"", "\\", "#{", "%(", "{.", "#[",
         "#=", "..", "-", "a-b", "self.", "def ", "function M", ":", "::", "=>", "=", "\n", " ", "x", "1", "`", "é",
-        "__END__", "proc ", "[", "]", "}", ")",
+        "__END__", "proc ", "[", "]", "}", ")", "f\"{", "{x:", "!r", "/[", "?", "<a", "q:to/E/", "fmt\"", "&\"", "M,",
+        "@{[", "$h{", "x = ",
     ];
     for id in IDS {
         let lang = Language::find(id).unwrap();
@@ -103,7 +104,7 @@ fn ruby_strings_and_literals() {
     assert_tokens("ruby", "x = n % 3", &[("%", Operator), ("3", Number)]);
     assert_tokens("ruby", "line =~ /ab+c/i", &[("/ab+c/i", Regex)]);
     assert_tokens("ruby", "half = total / 2", &[("/", Operator)]);
-    assert_tokens("ruby", "(1..10).each", &[("1", Number), ("..", Operator), ("10", Number)]);
+    assert_tokens("ruby", "(1..10).each", &[("1", Number), ("..", Punctuation), ("10", Number)]);
 }
 
 #[test]
@@ -278,7 +279,7 @@ fn elixir() {
     assert_tokens("elixir", "alias MyApp.Repo.User", &[("MyApp", Type), ("Repo", Type), ("User", Type)]);
     assert_tokens("elixir", "Enum.map(xs, &(&1 * 2))", &[("&1", Variable)]);
     assert_tokens("elixir", "a = :\"quoted atom\"", &[(":\"quoted atom\"", Constant)]);
-    assert_tokens("elixir", "for x <- 1..10, do: x", &[("..", Operator)]);
+    assert_tokens("elixir", "for x <- 1..10, do: x", &[("1", Number), ("..", Punctuation), ("10", Number)]);
 }
 
 #[test]
@@ -290,7 +291,7 @@ fn nim() {
     );
     assert_tokens("nim", "let x = 10'u8", &[("10'u8", Number)]);
     assert_tokens("nim", "let p = r\"C:\\new\"", &[("r\"C:\\new\"", String)]);
-    assert_tokens("nim", "for i in 0..<n: discard", &[("..<", Operator)]);
+    assert_tokens("nim", "for i in 0..<n: discard", &[("0", Number), ("..", Punctuation), ("<", Operator)]);
 }
 
 #[test]
@@ -475,7 +476,7 @@ fn wren() {
             ("\\n", Escape),
         ],
     );
-    assert_tokens("wren", "for (i in 1..5) {}", &[("1", Number), ("..", Operator), ("5", Number)]);
+    assert_tokens("wren", "for (i in 1..5) {}", &[("1", Number), ("..", Punctuation), ("5", Number)]);
 }
 
 #[test]
@@ -502,5 +503,123 @@ fn pony() {
             ("go", Function),
             ("'a'", String),
         ],
+    );
+}
+
+#[test]
+fn python_format_strings() {
+    assert_tokens(
+        "python",
+        "f\"{x:>10} {y!r} {z:{w}.2f} {d['k']} {a != b}\"",
+        &[
+            ("x", Text),
+            (":", Punctuation),
+            (">10", String),
+            ("!r}", Punctuation),
+            (":{", Punctuation),
+            ("w", Text),
+            (".2f", String),
+            ("'k'", String),
+            ("!=", Operator),
+        ],
+    );
+    assert_tokens(
+        "python",
+        "rf\"\\d{n}\\\"\" + 1",
+        &[("rf\"\\d", String), ("n", Text), ("\\\"\"", String), ("1", Number)],
+    );
+    // A broken field does not swallow the next line.
+    assert_tokens("python", "a = f\"{oops\nb = 1", &[("f\"{oops", String), ("b", Text), ("1", Number)]);
+    assert_tokens("python", "t\"{name}\"", &[("t\"", String), ("{", Punctuation), ("name", Text)]);
+}
+
+#[test]
+fn interpolation_fixes() {
+    assert_not("ruby", "x = a ? b: c", "b", Property);
+    assert_tokens("ruby", "f? b: 1", &[("b", Property)]);
+    assert_tokens("ruby", "r = /a#{x}b/i", &[("/a", Regex), ("#{", Punctuation), ("x", Text), ("b/i", Regex)]);
+    assert_tokens("ruby", "s.split(/ /)", &[("/ /", Regex)]);
+    assert_tokens(
+        "perl",
+        "print \"$h{key} $a[0] $o->{x} @{[ $n + 1 ]}\";",
+        &[
+            ("$h", Variable),
+            ("key", Property),
+            ("$a", Variable),
+            ("0", Number),
+            ("->", Operator),
+            ("x", Property),
+            ("@{[", Punctuation),
+            ("$n", Variable),
+            ("]}", Punctuation),
+        ],
+    );
+    assert_tokens("perl", "for (keys %h) { $x = $a % $b }", &[("%h", Variable), ("%", Operator)]);
+    assert_tokens("perl", "if ($s =~ /a\\/b/) {}", &[("/a\\/b/", Regex)]);
+    assert_tokens(
+        "tcl",
+        "puts \"a [lindex [split $s ,] 0] b\"",
+        &[("lindex", Builtin), ("split", Builtin), ("0", Number), (" b\"", String)],
+    );
+    assert_tokens("tcl", "if {$x} {puts hi} else {myproc 1}", &[("puts", Builtin)]);
+    assert_not("tcl", "set l {red green}", "red", Function);
+    assert_tokens("wren", "\"a %(b + 1) c\"", &[("%(", Punctuation), ("b", Text), ("1", Number), (" c\"", String)]);
+}
+
+#[test]
+fn raku_words_and_heredocs() {
+    assert_tokens(
+        "raku",
+        "my @a = <foo bar>; say %h<key>;",
+        &[("<foo bar>", String), ("%h", Variable), ("key", Property)],
+    );
+    assert_tokens("raku", "if $a < $b { }", &[("<", Operator)]);
+    assert_tokens(
+        "raku",
+        "my $t = qq:to/END/;\n  Hi $name\n  END\nsay 1;",
+        &[("qq:to/END/", String), ("$name", Variable), ("\n  END", String), ("say", Builtin)],
+    );
+    assert_tokens("raku", "sub is-done { isn't-ok() }", &[("is-done", Function), ("isn't-ok", Function)]);
+}
+
+#[test]
+fn chars_formats_and_comments() {
+    assert_tokens("elixir", "x = ?a; y = ?\\n", &[("?a", String), ("?", String), ("\\n", Escape)]);
+    assert_tokens("elixir", "empty?(l)", &[("empty?", Function)]);
+    assert_tokens(
+        "nim",
+        "echo &\"x={x:>4}\\t\", fmt\"{y}\"",
+        &[("&", Operator), ("x", Text), (">4", String), ("\\t", Escape), ("fmt", Function), ("y", Text)],
+    );
+    assert_tokens("nim", "#[ a #[ b ]# c ]# x", &[("#[ a #[ b ]# c ]#", Comment)]);
+    assert_tokens("julia", "#= a #= b =# c =# x", &[("#= a #= b =# c =#", Comment)]);
+    assert_tokens(
+        "coffeescript",
+        "### block ###\n#### banner\nx = /a[/]b/g",
+        &[("### block ###", Comment), ("#### banner", Comment), ("/a[/]b/g", Regex)],
+    );
+    assert_tokens("livescript", "/* c */ read-file = -> 1", &[("/* c */", Comment), ("read-file", Function)]);
+}
+
+#[test]
+fn autohotkey_commands() {
+    assert_tokens(
+        "autohotkey",
+        "MsgBox, It's done %name%, 4 ; note\nvar = Hi %x%\nWinMinimize title",
+        &[
+            ("MsgBox", Builtin),
+            ("%name%", Variable),
+            ("4", Number),
+            ("; note", Comment),
+            ("%x%", Variable),
+            ("WinMinimize", Function),
+        ],
+    );
+    assert_not("autohotkey", "MsgBox, It's done", "'s done", String);
+    assert_tokens("autohotkey", "x := %\"dyn\" i%", &[("%", Punctuation), ("\"dyn\"", String), ("%", Punctuation)]);
+    assert_tokens(
+        "applescript",
+        "on run\nend run\nto go()\nend go\nend tell",
+        &[("run", Function), ("run", Function), ("go", Function), ("go", Function), ("tell", Keyword)],
     );
 }

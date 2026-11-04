@@ -39,3 +39,4 @@ defmodule MyApp.Accounts.User do
     {:ok, pid, 'charlist', 1_000.5}
   end
 end
+IO.inspect([?a, ?\n], label: "chars")

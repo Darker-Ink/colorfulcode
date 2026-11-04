@@ -1,7 +1,7 @@
 //! Dynamic scripting languages.
 
 use super::{Definition, Engine};
-use crate::lexer::generic::{block_comment, escape_len, features::*, Interp, Lexer, Prefix, Spec, Str};
+use crate::lexer::generic::{escape_len, features::*, Interp, Lexer, Prefix, Spec, Str};
 use crate::lexer::{is_ident, is_ident_start, Ctx};
 use crate::Kind;
 
@@ -23,36 +23,25 @@ fn closing(open: u8) -> u8 {
     }
 }
 
-/// Offset of the bracket matching the one at `open`, skipping quoted strings.
-/// Gives up after a few kilobytes so unbalanced input stays linear.
-fn bracket_close(src: &[u8], open: usize) -> Option<usize> {
+/// Offset of the bracket closing the one at `open` on the same line, for short
+/// subscripts such as `$h{key}` inside strings. Never looks past `stop` (the
+/// literal's own closing byte) or more than a hundred bytes ahead.
+fn subscript_close(src: &[u8], open: usize, limit: usize, stop: u8) -> Option<usize> {
     let o = *src.get(open)?;
     let c = closing(o);
-    if c == o {
-        return None;
-    }
-    let limit = (open + 2048).min(src.len());
+    let limit = limit.min(open + 128).min(src.len());
     let mut depth = 0u32;
-    let mut i = open;
-    while i < limit {
-        match src[i] {
-            b'\\' => i += 1,
-            q @ (b'"' | b'\'') => {
-                i += 1;
-                while i < limit && src[i] != q && src[i] != b'\n' {
-                    i += if src[i] == b'\\' { 2 } else { 1 };
-                }
+    for (i, &b) in src.iter().enumerate().take(limit).skip(open) {
+        if b == o {
+            depth += 1;
+        } else if b == c {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
             }
-            b if b == o => depth += 1,
-            b if b == c => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
+        } else if b == b'\n' || (b == stop && i > open) {
+            return None;
         }
-        i += 1;
     }
     None
 }
@@ -65,16 +54,18 @@ struct Quote {
     escape: u8,
     /// Interpolation opener such as `#{`, ending in an opening bracket.
     interp: &'static [u8],
-    /// Lex the interpolation brackets as code too (Tcl's `[cmd]`).
-    embed_brackets: bool,
+    /// The language hook lexes the whole interpolation, brackets included (Tcl's `[cmd]`).
+    hook_interp: bool,
     /// Sigils that start a variable inside the literal (`$name`, `@list`).
     vars: &'static [u8],
+    /// Perl style `$h{key}`, `$a[0]`, `$r->{x}` and `@{[ expr ]}` after a sigil.
+    subscripts: bool,
     multiline: bool,
 }
 
 impl Quote {
     const fn new(kind: Kind) -> Quote {
-        Quote { kind, escape: b'\\', interp: b"", embed_brackets: false, vars: b"", multiline: true }
+        Quote { kind, escape: b'\\', interp: b"", hook_interp: false, vars: b"", subscripts: false, multiline: true }
     }
 
     const fn interp(self, interp: &'static [u8]) -> Quote {
@@ -99,7 +90,7 @@ impl Quote {
 
     /// The same literal without escapes or interpolation (`'...'` heredocs).
     const fn raw(self) -> Quote {
-        Quote { escape: 0, interp: b"", vars: b"", ..self }
+        Quote { escape: 0, interp: b"", vars: b"", subscripts: false, ..self }
     }
 }
 
@@ -142,28 +133,37 @@ fn skip_back_spaces(ctx: &Ctx, pos: usize) -> usize {
     i
 }
 
+/// Whether a `%` or `&` at the cursor is a sigil rather than an operator: in
+/// expression position, or after a space and glued to a name (`keys %h`).
+fn sigil_position(lx: &Lexer) -> bool {
+    let ctx = &*lx.ctx;
+    let pos = ctx.pos;
+    let next = ctx.at(pos + 1);
+    lx.expression_start()
+        || (pos > 0
+            && matches!(ctx.src[pos - 1], b' ' | b'\t')
+            && (is_ident_start(next) || matches!(next, b'$' | b'{' | b'*' | b'!' | b'?')))
+}
+
 /// Lexes a literal body from `from` up to the unbalanced `close` byte (or up
 /// to `limit` when `close` is 0) and returns its end. Tokens start at `start`
 /// so a prefix and the opening delimiter join the literal.
 fn scan_quoted(lx: &mut Lexer, start: usize, from: usize, limit: usize, open: u8, close: u8, q: Quote) -> usize {
-    let spec = lx.spec;
-    let ctx = &mut *lx.ctx;
-    let limit = limit.min(ctx.len());
+    let limit = limit.min(lx.ctx.len());
     let mut seg = start;
     let mut depth = 0u32;
     let mut i = from;
-    // Cleared after an unbalanced interpolation so a run of openers stays linear.
-    let mut interp = q.interp;
     while i < limit {
-        let b = ctx.src[i];
+        let b = lx.ctx.src[i];
         if b == q.escape && b != 0 {
             if matches!(q.kind, Kind::Regex | Kind::Comment) {
                 i += 2;
-                while i < limit && ctx.src[i] & 0xC0 == 0x80 {
+                while i < limit && lx.ctx.src[i] & 0xC0 == 0x80 {
                     i += 1;
                 }
                 continue;
             }
+            let ctx = &mut *lx.ctx;
             ctx.emit(seg, i, q.kind);
             ctx.pos = i;
             escape_len(ctx);
@@ -173,33 +173,29 @@ fn scan_quoted(lx: &mut Lexer, start: usize, from: usize, limit: usize, open: u8
             seg = end;
             continue;
         }
-        if !interp.is_empty() && ctx.starts_with_at(i, interp) {
-            let open_at = i + interp.len() - 1;
-            let close = bracket_close(ctx.src, open_at).filter(|&c| c < limit);
-            if close.is_none() {
-                interp = b"";
-            }
-            if let Some(c) = close {
-                ctx.emit(seg, i, q.kind);
-                if q.embed_brackets {
-                    ctx.embed_spec(spec, i, c + 1);
-                } else {
-                    ctx.emit(i, open_at + 1, Kind::Punctuation);
-                    ctx.embed_spec(spec, open_at + 1, c);
-                    ctx.emit(c, c + 1, Kind::Punctuation);
+        if !q.interp.is_empty() && lx.ctx.starts_with_at(i, q.interp) && lx.ctx.can_nest() {
+            lx.ctx.emit(seg, i, q.kind);
+            i = interpolation(lx, i, i + q.interp.len(), limit, q.hook_interp);
+            seg = i;
+            continue;
+        }
+        if q.vars.contains(&b) {
+            let end = var_end(lx.ctx, i + 1, limit);
+            if end > i + 1 {
+                lx.ctx.emit(seg, i, q.kind);
+                lx.ctx.emit(i, end, Kind::Variable);
+                i = end;
+                if q.subscripts {
+                    i = subscripts(lx, i, limit, if open == close { close } else { 0 });
                 }
-                i = c + 1;
                 seg = i;
                 continue;
             }
-        }
-        if q.vars.contains(&b) {
-            let end = var_end(ctx, i + 1, limit);
-            if end > i + 1 {
-                ctx.emit(seg, i, q.kind);
-                ctx.emit(i, end, Kind::Variable);
-                i = end;
-                seg = end;
+            // `@{[ expr ]}` and `${\ expr}` run code inside the string.
+            if q.subscripts && lx.ctx.at(i + 1) == b'{' && lx.ctx.can_nest() {
+                lx.ctx.emit(seg, i, q.kind);
+                i = interpolation(lx, i, i + 2, limit, false);
+                seg = i;
                 continue;
             }
         }
@@ -220,10 +216,57 @@ fn scan_quoted(lx: &mut Lexer, start: usize, from: usize, limit: usize, open: u8
         i += 1;
     }
     let end = i.min(limit);
-    ctx.emit(seg, end, q.kind);
-    ctx.pos = end;
+    lx.ctx.emit(seg, end, q.kind);
+    lx.ctx.pos = end;
     lx.mark_value();
     end
+}
+
+/// Lexes the interpolation at `at` as code up to the bracket that closes the
+/// one just before `body`, never past `limit`, and returns its end. As in the
+/// engine, an unclosed interpolation runs on instead of looking ahead for its
+/// close, so no input can make this quadratic.
+fn interpolation(lx: &mut Lexer, at: usize, body: usize, limit: usize, hook: bool) -> usize {
+    let full = lx.ctx.src;
+    lx.ctx.src = &full[..limit];
+    lx.ctx.pos = at;
+    match lx.spec.hook {
+        Some(h) if hook => {
+            if !h(lx) {
+                lx.ctx.pos = at + 1;
+            }
+        }
+        _ => {
+            let close = closing(full[body - 1]);
+            lx.ctx.emit(at, body, Kind::Punctuation);
+            lx.ctx.pos = body;
+            lx.nested(close);
+            if lx.ctx.peek() == close {
+                lx.ctx.token(1, Kind::Punctuation);
+            }
+        }
+    }
+    lx.ctx.src = full;
+    lx.ctx.pos
+}
+
+/// Perl subscripts after a variable in a string (`{key}`, `[0]`, `->` before
+/// either), lexed as code. Returns their end.
+fn subscripts(lx: &mut Lexer, from: usize, limit: usize, stop: u8) -> usize {
+    let spec = lx.spec;
+    let mut i = from;
+    loop {
+        let arrow = if lx.ctx.starts_with_at(i, b"->") { 2 } else { 0 };
+        if !matches!(lx.ctx.at(i + arrow), b'[' | b'{') {
+            return i;
+        }
+        let Some(c) = subscript_close(lx.ctx.src, i + arrow, limit, stop) else {
+            return i;
+        };
+        lx.ctx.emit(i, i + arrow, Kind::Operator);
+        lx.ctx.embed_spec(spec, i + arrow, c + 1);
+        i = c + 1;
+    }
 }
 
 /// Lexes a literal whose opening delimiter is at `open_at`. Brackets nest;
@@ -243,6 +286,49 @@ fn flags(lx: &mut Lexer, end: usize, kind: Kind) {
     }
     ctx.emit(end, e, kind);
     ctx.pos = ctx.pos.max(e);
+}
+
+/// `/regex/flags` at the cursor, in expression position. `interp` is the
+/// interpolation opener (`#{`) or empty. With `classes`, a `/` inside `[...]`
+/// does not end the literal (JavaScript rules) and a class may span at most 64
+/// bytes, so a run of unclosed ones stays linear; otherwise (Ruby, Perl) the
+/// first unescaped `/` ends it. A `/` with no closing one on its line is division.
+fn slash_regex(lx: &mut Lexer, classes: bool, interp: &'static [u8]) -> bool {
+    let ctx = &*lx.ctx;
+    let pos = ctx.pos;
+    if matches!(ctx.at(pos + 1), b'/' | b'*' | b'\n') {
+        return false;
+    }
+    // Start of the open character class, or 0.
+    let (mut i, mut class, mut interpolated) = (pos + 1, 0, false);
+    let close = loop {
+        if i >= ctx.len() || (class > 0 && i - class > 64) {
+            break None;
+        }
+        match ctx.src[i] {
+            b'\n' => break None,
+            b'\\' => i += 1,
+            b'[' if classes && class == 0 => class = i,
+            b']' => class = 0,
+            b'/' if class == 0 => break Some(i),
+            b if !interp.is_empty() && b == interp[0] && ctx.starts_with_at(i, interp) => interpolated = true,
+            _ => {}
+        }
+        i += 1;
+    };
+    let Some(close) = close else {
+        lx.ctx.token(1, Kind::Operator);
+        lx.mark_operator();
+        return true;
+    };
+    if interpolated {
+        quote(lx, pos, pos, Quote::new(Kind::Regex).interp(interp).single_line());
+    } else {
+        emit_to(lx, close + 1, Kind::Regex);
+    }
+    flags(lx, lx.ctx.pos, Kind::Regex);
+    lx.mark_value();
+    true
 }
 
 /// Start of the identifier that ends at `end`, if there is one. Words joined
@@ -294,6 +380,11 @@ fn key_colon(lx: &mut Lexer, skip: &[&str]) -> bool {
     };
     let src = lx.ctx.src;
     if ws > 0 && matches!(src[ws - 1], b'.' | b':' | b'@' | b'$' | b'?') {
+        return false;
+    }
+    // `a ? b: c` is a ternary; `foo? b: 1` passes a keyword argument to `foo?`.
+    let before = skip_back_spaces(lx.ctx, ws);
+    if before < ws && before > 0 && src[before - 1] == b'?' && (before < 2 || !is_ident(src[before - 2])) {
         return false;
     }
     if skip.iter().any(|w| w.as_bytes() == &src[ws..pos]) {
@@ -374,6 +465,19 @@ fn heredoc(lx: &mut Lexer, indent: &[u8], q: Quote) -> bool {
         return false;
     }
     let marker_end = word_end + quoted as usize;
+    let mark = word_start - quoted as usize;
+    lx.ctx.emit(start, mark, Kind::Operator);
+    lx.ctx.emit(mark, marker_end, Kind::String);
+    let body = if quote == b'\'' { q.raw() } else { q };
+    heredoc_body(lx, marker_end, word_start, word_end, indented, body);
+    true
+}
+
+/// The rest of a heredoc whose opening marker ends at `marker_end`: the rest of
+/// that line is code, then the body runs to the line holding only the word at
+/// `word_start..word_end` (after indentation when `indented`).
+fn heredoc_body(lx: &mut Lexer, marker_end: usize, word_start: usize, word_end: usize, indented: bool, q: Quote) {
+    let ctx = &*lx.ctx;
     let line_end = ctx.line_end(marker_end);
     let body_start = line_end + 1;
     let delimiter = &ctx.src[word_start..word_end];
@@ -394,21 +498,16 @@ fn heredoc(lx: &mut Lexer, indent: &[u8], q: Quote) -> bool {
         }
         pos = end + 1;
     }
-    let mark = word_start - quoted as usize;
     let spec = lx.spec;
     let ctx = &mut *lx.ctx;
-    ctx.emit(start, mark, Kind::Operator);
-    ctx.emit(mark, marker_end, Kind::String);
     ctx.embed_spec(spec, marker_end, line_end);
     if body_start >= ctx.len() {
         ctx.pos = ctx.len();
-        return true;
+        return;
     }
-    let body = if quote == b'\'' { q.raw() } else { q };
-    scan_quoted(lx, body_start, body_start, body_end, 0, 0, body);
+    scan_quoted(lx, body_start, body_start, body_end, 0, 0, q);
     lx.ctx.emit(body_end, term_end, Kind::String);
     lx.ctx.pos = term_end;
-    true
 }
 
 /// Emits from the cursor to `end` as `kind` and moves past it.
@@ -421,9 +520,9 @@ fn emit_to(lx: &mut Lexer, end: usize, kind: Kind) -> bool {
     end > start
 }
 
-/// `..` and `...` range operators, which the engine would otherwise read as
-/// the start of a number such as `.5`.
-fn dot_range(lx: &mut Lexer) -> bool {
+/// Lua's `..` concatenation (and `...` varargs), an operator rather than
+/// punctuation.
+fn lua_concat(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     if ctx.peek() != b'.' || ctx.peek_at(1) != b'.' {
         return false;
@@ -431,27 +530,6 @@ fn dot_range(lx: &mut Lexer) -> bool {
     let len = if ctx.peek_at(2) == b'.' { 3 } else { 2 };
     ctx.token(len, Kind::Operator);
     lx.mark_operator();
-    true
-}
-
-/// Joins `read-file` into one identifier when a `-` sits between two letters.
-fn kebab_join(lx: &mut Lexer) -> bool {
-    let ctx = &*lx.ctx;
-    let pos = ctx.pos;
-    if pos == 0 || !ctx.src[pos - 1].is_ascii_alphabetic() || !ctx.at(pos + 1).is_ascii_alphabetic() {
-        return false;
-    }
-    let Some(ws) = word_before(lx, pos) else {
-        return false;
-    };
-    let mut end = pos;
-    while ctx.at(end) == b'-' && ctx.at(end + 1).is_ascii_alphabetic() {
-        end = lx.scan_ident(end + 1);
-    }
-    lx.ctx.truncate_to(ws);
-    lx.ctx.pos = end;
-    let kind = lx.classify(ws, end);
-    lx.ctx.emit(ws, end, kind);
     true
 }
 
@@ -476,15 +554,197 @@ fn pod_block(lx: &mut Lexer, close: &[u8]) -> bool {
 
 // Python and Mojo
 
+/// What a backslash means inside a format string.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Backslash {
+    /// Starts an escape sequence.
+    Escape,
+    /// Python raw strings: kept as is, but `\"` does not end the string.
+    Skip,
+    /// An ordinary character (Nim raw strings).
+    Literal,
+}
+
+/// A format string with `{expr!r:spec}` fields (Python f-strings, Nim `fmt`).
+#[derive(Clone, Copy)]
+struct Fmt {
+    delim: &'static [u8],
+    backslash: Backslash,
+    multiline: bool,
+    /// Fields may hold strings using the same quote (Python 3.12).
+    nested_quotes: bool,
+}
+
+/// Lexes a format string body from `from` (just after the opening `delim`)
+/// with tokens starting at `start`, so a prefix joins the literal.
+fn format_string(lx: &mut Lexer, start: usize, from: usize, f: Fmt) {
+    let len = lx.ctx.len();
+    let mut seg = start;
+    let mut i = from;
+    let end = loop {
+        let src = lx.ctx.src;
+        let skip = src[i..]
+            .iter()
+            .position(|&b| matches!(b, b'{' | b'}' | b'\\' | b'\n') || b == f.delim[0])
+            .unwrap_or(len - i);
+        i += skip;
+        if i >= len {
+            break len;
+        }
+        let next = lx.ctx.at(i + 1);
+        match src[i] {
+            b'\\' => match f.backslash {
+                Backslash::Escape => {
+                    let ctx = &mut *lx.ctx;
+                    ctx.emit(seg, i, Kind::String);
+                    ctx.pos = i;
+                    escape_len(ctx);
+                    ctx.emit(i, ctx.pos, Kind::Escape);
+                    i = ctx.pos;
+                    seg = i;
+                }
+                Backslash::Skip => i = (i + 2).min(len),
+                Backslash::Literal => i += 1,
+            },
+            // `{{` and `}}` stand for literal braces.
+            b @ (b'{' | b'}') if next == b => i += 2,
+            b'{' => {
+                lx.ctx.emit(seg, i, Kind::String);
+                match format_field(lx, i, f) {
+                    Some(end) => {
+                        i = end;
+                        seg = end;
+                    }
+                    None => i += 1,
+                }
+            }
+            b'\n' if !f.multiline => break i,
+            _ if src[i..].starts_with(f.delim) => break i + f.delim.len(),
+            _ => i += 1,
+        }
+    };
+    lx.ctx.emit(seg, end, Kind::String);
+    lx.ctx.pos = end;
+    lx.mark_value();
+}
+
+/// A `{expr!r:spec}` replacement field at `at`. Returns its end, or `None`
+/// when no `}`, `!` or `:` ends the expression within a short distance, in
+/// which case the brace is plain text.
+fn format_field(lx: &mut Lexer, at: usize, f: Fmt) -> Option<usize> {
+    if !lx.ctx.can_nest() {
+        return None;
+    }
+    let src = lx.ctx.src;
+    let limit = (at + 256).min(src.len());
+    let mut depth = 0u32;
+    let mut j = at + 1;
+    let stop = loop {
+        match *src[..limit].get(j)? {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'}' if depth == 0 => break j,
+            b'}' => depth -= 1,
+            b'!' if depth == 0 && src.get(j + 1) != Some(&b'=') => break j,
+            b':' if depth == 0 => break j,
+            b'\n' if !f.multiline => return None,
+            q @ (b'"' | b'\'') => {
+                if !f.nested_quotes && src[j..].starts_with(f.delim) {
+                    return None;
+                }
+                let k = src[j + 1..limit].iter().position(|&b| b == q || b == b'\n')?;
+                if src[j + 1 + k] != q {
+                    return None;
+                }
+                j += k + 1;
+            }
+            _ => {}
+        }
+        j += 1;
+    };
+    lx.ctx.emit(at, at + 1, Kind::Punctuation);
+    lx.ctx.src = &src[..stop];
+    lx.ctx.pos = at + 1;
+    lx.nested(b'}');
+    lx.ctx.src = src;
+    let mut k = stop;
+    if src[k] != b'}' {
+        // `!r` conversion and `:spec`, which may hold nested `{fields}`.
+        let mut seg = k;
+        if src[k] == b'!' {
+            k += 1;
+            while src.get(k).is_some_and(|b| b.is_ascii_alphabetic()) {
+                k += 1;
+            }
+            lx.ctx.emit(seg, k, Kind::Punctuation);
+            seg = k;
+        }
+        if src.get(k) == Some(&b':') {
+            k += 1;
+            lx.ctx.emit(seg, k, Kind::Punctuation);
+            seg = k;
+        }
+        loop {
+            match src.get(k) {
+                None => break,
+                Some(b'}') => break,
+                Some(b'{') => {
+                    lx.ctx.emit(seg, k, Kind::String);
+                    lx.ctx.enter();
+                    let end = format_field(lx, k, f);
+                    lx.ctx.leave();
+                    k = end.unwrap_or(k + 1);
+                    seg = k;
+                }
+                Some(b'\n') if !f.multiline => break,
+                _ if src[k..].starts_with(f.delim) => break,
+                _ => k += 1,
+            }
+        }
+        lx.ctx.emit(seg, k, Kind::String);
+    }
+    lx.ctx.pos = k;
+    if lx.ctx.peek() == b'}' {
+        lx.ctx.token(1, Kind::Punctuation);
+    }
+    Some(lx.ctx.pos)
+}
+
+/// `f"..."` and `t"..."` strings with any `r` prefix.
+fn python_hook(lx: &mut Lexer) -> bool {
+    let ctx = &*lx.ctx;
+    let pos = ctx.pos;
+    let (mut i, mut fmt, mut raw) = (pos, false, false);
+    while i < pos + 2 {
+        match ctx.at(i) | 0x20 {
+            b'f' | b't' => fmt = true,
+            b'r' => raw = true,
+            _ => break,
+        }
+        i += 1;
+    }
+    let q = ctx.at(i);
+    if !fmt || !matches!(q, b'"' | b'\'') || (pos > 0 && is_ident(ctx.src[pos - 1])) {
+        return false;
+    }
+    let triple = ctx.at(i + 1) == q && ctx.at(i + 2) == q;
+    let delim: &'static [u8] = match (q, triple) {
+        (b'"', true) => b"\"\"\"",
+        (b'"', false) => b"\"",
+        (_, true) => b"'''",
+        _ => b"'",
+    };
+    let backslash = if raw { Backslash::Skip } else { Backslash::Escape };
+    format_string(lx, pos, i + delim.len(), Fmt { delim, backslash, multiline: triple, nested_quotes: true });
+    true
+}
+
 const PY_STRINGS: &[Str] =
     &[Str::quoted("\"\"\"").multiline(), Str::quoted("'''").multiline(), Str::quoted("\""), Str::quoted("'")];
 
 const PY_PREFIXES: &[Prefix] = &[
     Prefix::raw(b'r'),
     Prefix::raw(b'R'),
-    Prefix::interp(b'f', Interp::Brace),
-    Prefix::interp(b'F', Interp::Brace),
-    Prefix::interp(b't', Interp::Brace),
     Prefix::plain(b'b'),
     Prefix::plain(b'B'),
     Prefix::plain(b'u'),
@@ -524,6 +784,8 @@ static PYTHON_SPEC: Spec = Spec {
     function_keywords: &["def"],
     type_keywords: &["class"],
     features: PY_FEATURES,
+    hook: Some(python_hook),
+    hook_chars: "fFtTrR",
     ..Spec::DEFAULT
 };
 
@@ -593,7 +855,7 @@ fn ruby_percent(lx: &mut Lexer) -> bool {
 }
 
 /// Symbols, hash keys, `%` literals, heredocs, `=begin` comments, Crystal
-/// annotations and `def self.name`.
+/// annotations, `def self.name` and regex literals.
 fn ruby_hook(lx: &mut Lexer) -> bool {
     let ctx = &*lx.ctx;
     let pos = ctx.pos;
@@ -623,7 +885,6 @@ fn ruby_hook(lx: &mut Lexer) -> bool {
             }
             true
         }
-        b'.' if ctx.at(pos + 1) == b'.' => dot_range(lx),
         b'.' if pos >= 4 && &ctx.src[pos - 4..pos] == b"self" && is_ident_start(ctx.at(pos + 1)) => {
             let before = skip_back_spaces(ctx, pos - 4);
             if before < 3 || &ctx.src[before - 3..before] != b"def" || (before > 3 && is_ident(ctx.src[before - 4])) {
@@ -633,6 +894,7 @@ fn ruby_hook(lx: &mut Lexer) -> bool {
             lx.ctx.token(1, Kind::Punctuation);
             emit_to(lx, end, Kind::Function)
         }
+        b'/' if lx.expression_start() => slash_regex(lx, false, b"#{"),
         _ => false,
     }
 }
@@ -666,9 +928,9 @@ static RUBY_SPEC: Spec = Spec {
     type_keywords: &["class", "module"],
     ident_suffix: "?!",
     sigils: RUBY_SIGILS,
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | REGEX,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS,
     hook: Some(ruby_hook),
-    hook_chars: ":%<=_@.",
+    hook_chars: ":%<=_@./",
     ..Spec::DEFAULT
 };
 
@@ -708,7 +970,7 @@ pub static CRYSTAL: Definition =
 
 // Perl
 
-const PERL_STRING: Quote = Quote::new(Kind::String).vars(b"$@");
+const PERL_STRING: Quote = Quote { subscripts: true, ..Quote::new(Kind::String).vars(b"$@") };
 
 /// `$scalar`, `$#array`, `${name}`, `$1` and punctuation variables.
 fn perl_scalar(lx: &mut Lexer) -> bool {
@@ -803,7 +1065,7 @@ fn perl_hook(lx: &mut Lexer) -> bool {
     match ctx.peek() {
         b'$' => perl_scalar(lx),
         b'@' | b'%' => {
-            if ctx.peek() == b'%' && !lx.expression_start() {
+            if ctx.peek() == b'%' && !sigil_position(lx) {
                 return false;
             }
             let end = match ctx.at(pos + 1) {
@@ -828,18 +1090,17 @@ fn perl_hook(lx: &mut Lexer) -> bool {
             quote(lx, pos, pos, PERL_STRING);
             true
         }
-        b'/' if !lx.expression_start() => {
+        b'/' => {
+            // A regex in expression position, or after `split` and `grep`.
             let mut e = skip_back_spaces(ctx, pos);
             let word_end = e;
             while e > 0 && ctx.src[e - 1].is_ascii_lowercase() {
                 e -= 1;
             }
-            if !matches!(&ctx.src[e..word_end], b"split" | b"grep") || ctx.at(pos + 1) == b'/' {
+            if !lx.expression_start() && !matches!(&ctx.src[e..word_end], b"split" | b"grep") {
                 return false;
             }
-            let end = quote(lx, pos, pos, Quote::new(Kind::Regex).single_line());
-            flags(lx, end, Kind::Regex);
-            true
+            slash_regex(lx, false, b"")
         }
         b'<' if ctx.at(pos + 1) == b'<' => heredoc(lx, b"~", PERL_STRING),
         b'=' if ctx.at(pos + 1) == b'>' => {
@@ -851,7 +1112,6 @@ fn perl_hook(lx: &mut Lexer) -> bool {
             emit_to(lx, len, Kind::Comment)
         }
         b'{' => perl_subscript(lx),
-        b'.' => dot_range(lx),
         b'm' | b'q' | b's' | b't' | b'y' => perl_quote_op(lx),
         _ => false,
     }
@@ -913,9 +1173,9 @@ static PERL_SPEC: Spec = Spec {
     constants: &["undef", "__FILE__", "__LINE__", "__PACKAGE__", "__SUB__"],
     function_keywords: &["sub"],
     type_keywords: &["package"],
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | REGEX,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS,
     hook: Some(perl_hook),
-    hook_chars: "$@%&\"/<=_{.mqsty",
+    hook_chars: "$@%&\"/<=_{mqsty",
     ..Spec::DEFAULT
 };
 
@@ -943,6 +1203,73 @@ fn raku_ident_end(ctx: &Ctx, from: usize) -> usize {
     }
 }
 
+/// `q:to/END/`, `qq:to/END/` and `Q:heredoc<END>` with the word `q` at
+/// `pos..end`. The terminator may be indented.
+fn raku_heredoc(lx: &mut Lexer, pos: usize, end: usize) -> bool {
+    let ctx = &*lx.ctx;
+    let body = match &ctx.src[pos..end] {
+        b"qq" => RAKU_STRING,
+        b"q" | b"Q" => Quote::new(Kind::String).raw(),
+        _ => return false,
+    };
+    let adverb = if ctx.starts_with_at(end, b":to") {
+        3
+    } else if ctx.starts_with_at(end, b":heredoc") {
+        8
+    } else {
+        return false;
+    };
+    let open = ctx.at(end + adverb);
+    if !matches!(open, b'/' | b'<' | b'{' | b'(' | b'[' | b'\'' | b'"') {
+        return false;
+    }
+    let word_start = end + adverb + 1;
+    let mut word_end = word_start;
+    while is_ident(ctx.at(word_end)) || ctx.at(word_end) == b'-' {
+        word_end += 1;
+    }
+    if word_end == word_start || ctx.at(word_end) != closing(open) {
+        return false;
+    }
+    lx.ctx.emit(pos, word_end + 1, Kind::String);
+    heredoc_body(lx, word_end + 1, word_start, word_end, true, body);
+    true
+}
+
+/// `<a b c>` word lists in expression position and `%h<key>` subscripts.
+fn raku_angle(lx: &mut Lexer) -> bool {
+    let ctx = &*lx.ctx;
+    let pos = ctx.pos;
+    let prev = if pos > 0 { ctx.src[pos - 1] } else { 0 };
+    let subscript = is_ident(prev) || matches!(prev, b')' | b']' | b'}' | b'>');
+    let next = ctx.at(pos + 1);
+    if !(subscript || lx.expression_start())
+        || matches!(next, 0 | b'=' | b'<' | b'>' | b'-' | b'+' | b'~' | b'\n' | b'\r')
+        || (subscript && next.is_ascii_whitespace())
+    {
+        return false;
+    }
+    let end = ctx.line_end_within(pos + 1, 256);
+    let close = match ctx.src[pos + 1..end]
+        .iter()
+        .position(|&b| matches!(b, b'>' | b'<' | b';' | b'{' | b'}' | b'(' | b')' | b'='))
+    {
+        Some(i) if ctx.src[pos + 1 + i] == b'>' => pos + 1 + i,
+        _ => return false,
+    };
+    if subscript {
+        let ctx = &mut *lx.ctx;
+        ctx.token(1, Kind::Punctuation);
+        ctx.emit(pos + 1, close, Kind::Property);
+        ctx.pos = close;
+        ctx.token(1, Kind::Punctuation);
+    } else {
+        emit_to(lx, close + 1, Kind::String);
+    }
+    lx.mark_value();
+    true
+}
+
 fn raku_hook(lx: &mut Lexer) -> bool {
     let ctx = &*lx.ctx;
     let pos = ctx.pos;
@@ -963,7 +1290,7 @@ fn raku_hook(lx: &mut Lexer) -> bool {
             emit_to(lx, end, Kind::Comment)
         }
         b'$' | b'@' | b'%' | b'&' => {
-            if matches!(b, b'%' | b'&') && !lx.expression_start() {
+            if matches!(b, b'%' | b'&') && !sigil_position(lx) {
                 return false;
             }
             let mut i = pos + 1;
@@ -987,7 +1314,6 @@ fn raku_hook(lx: &mut Lexer) -> bool {
             quote(lx, pos, pos, RAKU_STRING);
             true
         }
-        b'.' => dot_range(lx),
         b'=' if ctx.at(pos + 1) == b'>' => {
             retag_prev_word(lx, pos, Kind::Property);
             false
@@ -996,9 +1322,26 @@ fn raku_hook(lx: &mut Lexer) -> bool {
             quote(lx, pos, pos, Quote::new(Kind::Regex).single_line());
             true
         }
+        b'<' => raku_angle(lx),
+        b'\'' if pos > 0 && is_ident(ctx.src[pos - 1]) && ctx.at(pos + 1).is_ascii_alphabetic() => {
+            // `isn't`: an apostrophe between letters joins the word.
+            let Some(ws) = word_before(lx, pos) else {
+                return false;
+            };
+            let end = raku_ident_end(ctx, ws);
+            lx.ctx.truncate_to(ws);
+            lx.ctx.pos = end;
+            let kind = lx.classify(ws, end);
+            lx.ctx.emit(ws, end, kind);
+            true
+        }
         _ if is_ident_start(b) => {
             let end = raku_ident_end(ctx, pos);
             let delim = ctx.at(end);
+            if delim == b':' && raku_heredoc(lx, pos, end) {
+                return true;
+            }
+            let ctx = &*lx.ctx;
             let quoted = !is_ident(delim)
                 && !delim.is_ascii_whitespace()
                 && !matches!(delim, 0 | b'(' | b',' | b';' | b')' | b'}' | b']' | b'>' | b'=' | b'.' | b':' | b'-');
@@ -1042,9 +1385,10 @@ static RAKU_SPEC: Spec = Spec {
     function_keywords: &["sub", "method", "submethod", "multi", "proto", "token", "rule", "regex"],
     type_keywords: &["class", "role", "grammar", "module", "package", "subset", "enum"],
     sigils: &[(b':', Kind::Constant)],
-    features: CALLS | CAPITALIZED_TYPES | MEMBERS,
+    features: CALLS | CAPITALIZED_TYPES | MEMBERS | KEBAB,
     hook: Some(raku_hook),
-    hook_chars: "#=$@%&\"/.abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
+    // Letters that start quote operators (`m//`, `rx//`, `s///`, `tr///`, `q//`, `Q//`).
+    hook_chars: "#=$@%&\"/<'mrstqQ",
     ..Spec::DEFAULT
 };
 
@@ -1118,7 +1462,7 @@ fn lua_hook(lx: &mut Lexer) -> bool {
             }
             None => false,
         },
-        b'.' if ctx.at(pos + 1) == b'.' => dot_range(lx),
+        b'.' if ctx.at(pos + 1) == b'.' => lua_concat(lx),
         b'.' => {
             unmark_function_owner(lx, pos);
             false
@@ -1190,8 +1534,9 @@ fn moon_hook(lx: &mut Lexer) -> bool {
             lx.mark_value();
             true
         }
+        b'/' if lx.expression_start() => slash_regex(lx, true, b"#{"),
         b'=' | b':' => arrow_assignment(lx, ARROWS),
-        b'.' => dot_range(lx),
+        b'.' => lua_concat(lx),
         _ => false,
     }
 }
@@ -1293,17 +1638,13 @@ pub static R: Definition = Definition::new("r", "R", Engine::Generic(&R_SPEC))
 
 // Julia
 
-/// Nested `#= =#` comments, char literals versus the transpose operator, and
+/// Char literals versus the transpose operator, and
 /// `r"regex"` and `raw"..."` strings.
 fn julia_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let pos = ctx.pos;
     let prev = if pos > 0 { ctx.src[pos - 1] } else { 0 };
     match ctx.peek() {
-        b'#' if ctx.at(pos + 1) == b'=' => {
-            block_comment(ctx, "#=", "=#", true);
-            true
-        }
         b'\'' => {
             if is_ident(prev) || matches!(prev, b')' | b']' | b'}' | b'\'' | b'.') {
                 ctx.token(1, Kind::Operator);
@@ -1350,6 +1691,8 @@ const JULIA_REGEX: Str = Str::quoted("\"").kind(Kind::Regex);
 
 static JULIA_SPEC: Spec = Spec {
     line_comments: &["#"],
+    block_comments: &[("#=", "=#")],
+    nested_comments: true,
     strings: &[
         Str::quoted("\"\"\"").multiline().interp(Interp::DollarParen),
         Str::quoted("\"").multiline().interp(Interp::DollarParen),
@@ -1373,7 +1716,7 @@ static JULIA_SPEC: Spec = Spec {
     ident_suffix: "!",
     features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS,
     hook: Some(julia_hook),
-    hook_chars: "#'r",
+    hook_chars: "'r",
     ..Spec::DEFAULT
 };
 
@@ -1415,7 +1758,7 @@ fn elixir_sigil(lx: &mut Lexer) -> bool {
     true
 }
 
-/// Sigils, atoms, keyword list keys, module aliases and `&1` captures.
+/// Sigils, atoms, keyword list keys, module aliases, `&1` captures and `?a` characters.
 fn elixir_hook(lx: &mut Lexer) -> bool {
     let ctx = &*lx.ctx;
     let pos = ctx.pos;
@@ -1428,7 +1771,6 @@ fn elixir_hook(lx: &mut Lexer) -> bool {
             }
             key_colon(lx, &["do", "else", "after", "rescue", "catch"])
         }
-        b'.' if ctx.at(pos + 1) == b'.' => dot_range(lx),
         b'.' if ctx.at(pos + 1).is_ascii_uppercase() => {
             let end = lx.scan_ident(pos + 1);
             lx.ctx.token(1, Kind::Punctuation);
@@ -1438,6 +1780,22 @@ fn elixir_hook(lx: &mut Lexer) -> bool {
         }
         b'&' if ctx.at(pos + 1).is_ascii_digit() => {
             emit_to(lx, pos + 2, Kind::Variable);
+            lx.mark_value();
+            true
+        }
+        // `?a` and `?\n` character literals.
+        b'?' if !matches!(ctx.at(pos + 1), 0 | b' ' | b'\t' | b'\r' | b'\n') => {
+            let ctx = &mut *lx.ctx;
+            ctx.token(1, Kind::String);
+            if ctx.peek() == b'\\' {
+                let at = ctx.pos;
+                escape_len(ctx);
+                ctx.emit_from(at, Kind::Escape);
+            } else {
+                let at = ctx.pos;
+                ctx.bump_char();
+                ctx.emit_from(at, Kind::String);
+            }
             lx.mark_value();
             true
         }
@@ -1470,7 +1828,7 @@ static ELIXIR_SPEC: Spec = Spec {
     sigils: &[(b':', Kind::Constant)],
     features: CALLS | CAPITALIZED_TYPES | MEMBERS | ANNOTATIONS,
     hook: Some(elixir_hook),
-    hook_chars: "~:.&",
+    hook_chars: "~:.&?",
     ..Spec::DEFAULT
 };
 
@@ -1481,17 +1839,20 @@ pub static ELIXIR: Definition = Definition::new("elixir", "Elixir", Engine::Gene
 
 // Nim
 
-/// Nested `#[ ]#` comments, `{.pragmas.}` and `1'u8` literal suffixes.
+/// `{.pragmas.}`, `1'u8` literal suffixes and `fmt"{x}"` / `&"{x}"` format strings.
 fn nim_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let pos = ctx.pos;
+    let prev = if pos > 0 { ctx.src[pos - 1] } else { 0 };
     match ctx.peek() {
-        b'#' if ctx.starts_with(b"##[") => {
-            block_comment(ctx, "##[", "]##", true);
+        b'f' if ctx.starts_with(b"fmt\"") && !is_ident(prev) => {
+            ctx.token(3, Kind::Function);
+            nim_format(lx, Backslash::Literal);
             true
         }
-        b'#' if ctx.at(pos + 1) == b'[' => {
-            block_comment(ctx, "#[", "]#", true);
+        b'&' if ctx.at(pos + 1) == b'"' => {
+            ctx.token(1, Kind::Operator);
+            nim_format(lx, Backslash::Escape);
             true
         }
         b'{' if ctx.at(pos + 1) == b'.' => {
@@ -1505,13 +1866,27 @@ fn nim_hook(lx: &mut Lexer) -> bool {
             }
             emit_to(lx, end, Kind::Number)
         }
-        b'.' => dot_range(lx),
         _ => false,
     }
 }
 
+/// A format string whose opening quote is at the cursor. Triple quoted ones are raw.
+fn nim_format(lx: &mut Lexer, backslash: Backslash) {
+    let pos = lx.ctx.pos;
+    let (delim, backslash): (&'static [u8], _) =
+        if lx.ctx.starts_with(b"\"\"\"") { (b"\"\"\"", Backslash::Literal) } else { (b"\"", backslash) };
+    format_string(
+        lx,
+        pos,
+        pos + delim.len(),
+        Fmt { delim, backslash, multiline: delim.len() == 3, nested_quotes: false },
+    );
+}
+
 static NIM_SPEC: Spec = Spec {
     line_comments: &["#"],
+    block_comments: &[("##[", "]##"), ("#[", "]#")],
+    nested_comments: true,
     strings: &[Str::quoted("\"\"\"").raw().multiline(), Str::quoted("\""), Str::quoted("'")],
     string_prefixes: &[Prefix::raw(b'r'), Prefix::raw(b'R')],
     keywords: &[
@@ -1536,7 +1911,7 @@ static NIM_SPEC: Spec = Spec {
     type_keywords: &["type"],
     features: CALLS | CAPITALIZED_TYPES | MEMBERS,
     hook: Some(nim_hook),
-    hook_chars: "#{'.",
+    hook_chars: "{'f&",
     ..Spec::DEFAULT
 };
 
@@ -1562,8 +1937,8 @@ fn coffee_hook(lx: &mut Lexer) -> bool {
             lx.mark_value();
             true
         }
+        b'/' if lx.expression_start() => slash_regex(lx, true, b"#{"),
         b'=' | b':' => arrow_assignment(lx, ARROWS),
-        b'.' => dot_range(lx),
         _ => false,
     }
 }
@@ -1582,7 +1957,7 @@ const COFFEE_CONSTANTS: &[&str] = &["true", "false", "null", "undefined", "yes",
 const COFFEE_BUILTINS: &[&str] =
     &["console", "window", "document", "require", "module", "exports", "process", "Math", "JSON"];
 
-const COFFEE_FEATURES: u32 = CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | REGEX | IDENT_KEYS;
+const COFFEE_FEATURES: u32 = CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | IDENT_KEYS;
 
 static COFFEESCRIPT_SPEC: Spec = Spec {
     line_comments: &["#"],
@@ -1600,7 +1975,7 @@ static COFFEESCRIPT_SPEC: Spec = Spec {
     sigils: &[(b'@', Kind::Variable)],
     features: COFFEE_FEATURES,
     hook: Some(coffee_hook),
-    hook_chars: "#/=:.",
+    hook_chars: "#/=:",
     ..Spec::DEFAULT
 };
 
@@ -1623,9 +1998,8 @@ fn livescript_hook(lx: &mut Lexer) -> bool {
             lx.mark_value();
             true
         }
+        b'/' if lx.expression_start() => slash_regex(lx, true, b"#{"),
         b'=' | b':' => arrow_assignment(lx, LIVESCRIPT_ARROWS),
-        b'.' => dot_range(lx),
-        b'-' => kebab_join(lx),
         _ => false,
     }
 }
@@ -1646,9 +2020,9 @@ static LIVESCRIPT_SPEC: Spec = Spec {
     variables: &["this"],
     type_keywords: &["class"],
     sigils: &[(b'@', Kind::Variable)],
-    features: COFFEE_FEATURES,
+    features: COFFEE_FEATURES | KEBAB,
     hook: Some(livescript_hook),
-    hook_chars: "\\=:.-",
+    hook_chars: "\\=:/",
     ..Spec::DEFAULT
 };
 
@@ -1694,6 +2068,12 @@ fn tcl_hook(lx: &mut Lexer) -> bool {
                 };
                 lx.ctx.emit(start, end, kind);
             }
+            // Lex the substitution as a unit so it also works inside strings.
+            lx.nested(b']');
+            if lx.ctx.peek() == b']' {
+                lx.ctx.token(1, Kind::Punctuation);
+            }
+            lx.mark_value();
             true
         }
         b'$' => {
@@ -1710,8 +2090,12 @@ fn tcl_hook(lx: &mut Lexer) -> bool {
             true
         }
         b'{' if is_ident_start(ctx.at(pos + 1)) => {
-            // `{word list}` is data; a command body starts with a space or newline.
+            // `{word list}` is data, but `{puts $x}` is a body whose first word
+            // is a known command; the engine marks that one.
             let end = lx.scan_ident(pos + 1);
+            if lx.word_kind(&ctx.src[pos + 1..end]).is_some() {
+                return false;
+            }
             lx.ctx.token(1, Kind::Punctuation);
             lx.ctx.pos = end;
             let kind = lx.classify(pos + 1, end);
@@ -1730,7 +2114,7 @@ fn tcl_hook(lx: &mut Lexer) -> bool {
     }
 }
 
-const TCL_STRING: Quote = Quote { embed_brackets: true, ..Quote::new(Kind::String).interp(b"[").vars(b"$") };
+const TCL_STRING: Quote = Quote { hook_interp: true, ..Quote::new(Kind::String).interp(b"[").vars(b"$") };
 
 static TCL_SPEC: Spec = Spec {
     line_comments: &["#"],
@@ -1863,7 +2247,93 @@ fn ahk_line_label(lx: &mut Lexer) -> bool {
     {
         return emit_to(lx, end + 1, Kind::Meta);
     }
-    false
+    if end == pos || !ctx.src[pos].is_ascii_alphabetic() {
+        return false;
+    }
+    // Commands: `MsgBox, text` (v1) takes literal arguments, `var = text` is a
+    // v1 literal assignment and `WinMinimize title` calls without parentheses.
+    let kind = lx.word_kind(&ctx.src[pos..end]);
+    let next_at = ctx.skip_spaces_from(end);
+    let next = ctx.at(next_at);
+    let spaced = next_at > end;
+    match next {
+        b',' if kind != Some(Kind::Constant) => {
+            lx.ctx.emit(pos, end, kind.unwrap_or(Kind::Function));
+            lx.ctx.emit(next_at, next_at + 1, Kind::Punctuation);
+            ahk_args(lx, next_at + 1, line_end, true);
+        }
+        b'=' if kind.is_none() && !matches!(ctx.at(next_at + 1), b'=' | b'>') => {
+            lx.ctx.emit(next_at, next_at + 1, Kind::Operator);
+            ahk_args(lx, next_at + 1, line_end, false);
+        }
+        b'"' | b'\'' | b'%' | b'0'..=b'9' | b'\r' | b'\n' | 0 | b'_' | b'a'..=b'z' | b'A'..=b'Z'
+            if (spaced || matches!(next, b'\r' | b'\n' | 0)) && matches!(kind, None | Some(Kind::Builtin)) =>
+        {
+            lx.ctx.pos = end;
+            lx.ctx.emit(pos, end, kind.unwrap_or(Kind::Function));
+        }
+        _ => return false,
+    }
+    lx.mark_operator();
+    true
+}
+
+/// Literal command arguments (AutoHotkey v1) from `from` to the end of the
+/// line or a comment: `%var%` references, backtick escapes, plain numbers and
+/// `% expr` expressions. `commas` splits them into separate arguments.
+fn ahk_args(lx: &mut Lexer, from: usize, line_end: usize, commas: bool) {
+    let ctx = &*lx.ctx;
+    let mut end = from;
+    while end < line_end && !(ctx.src[end] == b';' && matches!(ctx.src[end - 1], b' ' | b'\t')) {
+        end += 1;
+    }
+    let mut i = from;
+    while i < end {
+        let ctx = &mut *lx.ctx;
+        let arg = ctx.skip_spaces_from(i);
+        if ctx.at(arg) == b'%' && matches!(ctx.at(arg + 1), b' ' | b'\t') {
+            // A forced expression runs to the end of the line.
+            ctx.emit(arg, arg + 1, Kind::Punctuation);
+            let spec = lx.spec;
+            lx.ctx.embed_spec(spec, arg + 1, end);
+            break;
+        }
+        let mut j = arg;
+        while j < end && !(commas && ctx.src[j] == b',') {
+            match ctx.src[j] {
+                b'`' => {
+                    let mut e = (j + 2).min(end);
+                    while e < end && ctx.src[e] & 0xC0 == 0x80 {
+                        e += 1;
+                    }
+                    ctx.emit(j, e, Kind::Escape);
+                    j = e;
+                }
+                b'%' => {
+                    let mut e = j + 1;
+                    while e < end && is_ident(ctx.src[e]) {
+                        e += 1;
+                    }
+                    if e > j + 1 && ctx.at(e) == b'%' {
+                        ctx.emit(j, e + 1, Kind::Variable);
+                        j = e + 1;
+                    } else {
+                        j += 1;
+                    }
+                }
+                _ => j += 1,
+            }
+        }
+        let word = ctx.src[arg..j].trim_ascii_end();
+        if !word.is_empty() && (word.iter().all(u8::is_ascii_digit) || (word.starts_with(b"0x") && word.len() > 2)) {
+            ctx.emit(arg, arg + word.len(), Kind::Number);
+        }
+        if j < end {
+            ctx.emit(j, j + 1, Kind::Punctuation);
+        }
+        i = j + 1;
+    }
+    lx.ctx.pos = end;
 }
 
 /// `;` comments need a space before them, backtick escapes, `%var%`, hotkeys and labels.
@@ -1882,15 +2352,20 @@ fn ahk_hook(lx: &mut Lexer) -> bool {
             quote(lx, pos, pos, AHK_STRING);
             true
         }
-        b'%' if is_ident_start(ctx.at(pos + 1)) => {
-            let mut end = pos + 1;
-            while is_ident(ctx.at(end)) {
-                end += 1;
-            }
-            if ctx.at(end) != b'%' {
+        b'%' if !matches!(ctx.at(pos + 1), b' ' | b'\t' | b'%') => {
+            let line_end = ctx.line_end_within(pos + 1, 128);
+            let Some(close) = ctx.src[pos + 1..line_end].iter().position(|&b| b == b'%').map(|i| pos + 1 + i) else {
                 return false;
+            };
+            if ctx.src[pos + 1..close].iter().all(|&b| is_ident(b)) {
+                emit_to(lx, close + 1, Kind::Variable);
+            } else {
+                // `%expr%` dereferences the result of an expression.
+                let spec = lx.spec;
+                lx.ctx.token(1, Kind::Punctuation);
+                lx.ctx.embed_spec(spec, pos + 1, close);
+                lx.ctx.token(1, Kind::Punctuation);
             }
-            emit_to(lx, end + 1, Kind::Variable);
             lx.mark_value();
             true
         }
@@ -1936,12 +2411,12 @@ static APPLESCRIPT_SPEC: Spec = Spec {
     strings: &[Str::quoted("\"").multiline()],
     keywords: &[
         "about", "above", "after", "against", "and", "around", "as", "at", "before", "behind", "below", "beneath",
-        "beside", "between", "by", "considering", "contains", "continue", "copy", "div", "does", "else", "end",
-        "equal", "equals", "error", "every", "exit", "from", "get", "given", "global", "if", "ignoring", "in", "into",
-        "is", "local", "mod", "not", "of", "onto", "or", "out", "over", "property", "put", "repeat", "return",
-        "returning", "script", "set", "some", "tell", "than", "that", "the", "then", "through", "thru", "timeout",
-        "times", "to", "transaction", "try", "until", "where", "while", "whose", "with", "without", "first", "last",
-        "front", "back", "middle", "contain", "greater", "less",
+        "beside", "between", "by", "considering", "contains", "continue", "copy", "div", "does", "else", "equal",
+        "equals", "error", "every", "exit", "from", "get", "given", "global", "if", "ignoring", "in", "into", "is",
+        "local", "mod", "not", "of", "onto", "or", "out", "over", "property", "put", "repeat", "return", "returning",
+        "script", "set", "some", "tell", "than", "that", "the", "then", "through", "thru", "timeout", "times", "to",
+        "transaction", "try", "until", "where", "while", "whose", "with", "without", "first", "last", "front", "back",
+        "middle", "contain", "greater", "less",
     ],
     types: &[
         "application", "alias", "file", "folder", "list", "record", "text", "string", "integer", "real", "number",
@@ -1950,7 +2425,8 @@ static APPLESCRIPT_SPEC: Spec = Spec {
     builtins: &["display", "dialog", "notification", "activate", "quit", "count", "log", "run", "launch", "open"],
     constants: &["true", "false", "missing", "value", "pi", "tab", "linefeed", "space", "quote"],
     variables: &["me", "my", "it", "its", "result"],
-    function_keywords: &["on"],
+    // `end name` closes a handler, so the name after `end` is one too (`end tell` stays a keyword).
+    function_keywords: &["on", "end"],
     case_insensitive: true,
     features: CALLS,
     ..Spec::DEFAULT
@@ -1977,7 +2453,6 @@ fn wren_hook(lx: &mut Lexer) -> bool {
             quote(lx, pos, pos, Quote::new(Kind::String).interp(b"%("));
             true
         }
-        b'.' => dot_range(lx),
         b'_' if is_ident(ctx.at(pos + 1)) && (pos == 0 || !is_ident(ctx.src[pos - 1])) => {
             let end = lx.scan_ident(pos);
             emit_to(lx, end, Kind::Variable);
@@ -2001,7 +2476,7 @@ static WREN_SPEC: Spec = Spec {
     variables: &["this"],
     features: CALLS | CAPITALIZED_TYPES | MEMBERS,
     hook: Some(wren_hook),
-    hook_chars: "\"_.",
+    hook_chars: "\"_",
     ..Spec::DEFAULT
 };
 
