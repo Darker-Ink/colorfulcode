@@ -660,7 +660,11 @@ fn batch_variable(ctx: &Ctx, start: usize) -> Option<usize> {
         (b'%', b'%') if ctx.at(start + 2) == b'~' || ctx.at(start + 2).is_ascii_alphabetic() => {
             Some(scan(ctx, start + 2, |b| b == b'~' || b.is_ascii_alphanumeric()))
         }
-        (b'%', b'~') => Some((scan(ctx, start + 2, |b| b.is_ascii_alphabetic()) + 1).min(le)),
+        (b'%', b'~') => {
+            // Modifier letters followed by the argument number: `%~dp0`, `%~nx1`.
+            let e = scan(ctx, start + 2, |b| b.is_ascii_alphabetic());
+            Some(if ctx.at(e).is_ascii_digit() || ctx.at(e) == b'*' { e + 1 } else { e }.min(le))
+        }
         (b'%', b'0'..=b'9' | b'*') => Some(start + 2),
         (b'%' | b'!', _) if is_ident_start(next) => {
             let close = ctx.at(start);
