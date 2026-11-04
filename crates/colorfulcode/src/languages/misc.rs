@@ -1147,6 +1147,18 @@ pub static SYSTEMVERILOG: Definition =
 
 // COBOL
 
+/// Start of the line containing `pos`, if it is at most 16 bytes back. The
+/// hook only cares about the first columns, and a bounded look back keeps long
+/// lines linear.
+fn cobol_line_start(ctx: &Ctx, pos: usize) -> Option<usize> {
+    let from = pos.saturating_sub(16);
+    match ctx.src[from..pos].iter().rposition(|&c| c == b'\n') {
+        Some(i) => Some(from + i + 1),
+        None if from == 0 => Some(0),
+        None => None,
+    }
+}
+
 /// Fixed format comment lines, `PIC` clauses and paragraph names.
 fn cobol_hook(lx: &mut Lexer) -> bool {
     let start = lx.ctx.pos;
@@ -1163,7 +1175,9 @@ fn cobol_hook(lx: &mut Lexer) -> bool {
     }
     if b == b'*' || b == b'/' {
         let ctx = &mut *lx.ctx;
-        let line = ctx.src[..start].iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
+        let Some(line) = cobol_line_start(ctx, start) else {
+            return false;
+        };
         if start - line == 6 && ctx.src[line..start].iter().all(|c| c.is_ascii_digit() || *c == b' ') {
             let end = ctx.line_end(start);
             put(ctx, start, end, Kind::Comment);
@@ -1189,9 +1203,9 @@ fn cobol_hook(lx: &mut Lexer) -> bool {
         put(ctx, i, pic_end, Kind::Type);
         return true;
     }
-    let line = ctx.src[..start].iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
-    let prefix = &ctx.src[line..start];
-    let area_a = prefix.iter().all(|&c| c == b' ')
+    let line = cobol_line_start(ctx, start);
+    let prefix = line.map_or(&b""[..], |line| &ctx.src[line..start]);
+    let area_a = line.is_some() && prefix.iter().all(|&c| c == b' ')
         || (prefix.len() >= 7 && prefix[..6].iter().all(u8::is_ascii_digit) && prefix[6..].iter().all(|&c| c == b' '));
     if area_a && ctx.at(end) == b'.' && rest_blank(ctx, end + 1) {
         let kind = match lx.classify(start, end) {
