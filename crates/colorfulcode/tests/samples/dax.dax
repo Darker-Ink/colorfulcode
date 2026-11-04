@@ -1,0 +1,32 @@
+// Sales measures
+Total Sales =
+SUMX ( Sales, Sales[Quantity] * Sales[Unit Price] )
+
+Sales YTD =
+TOTALYTD ( [Total Sales], 'Date'[Date] )
+
+-- Margin with a guard against division by zero
+Margin % =
+VAR Revenue = [Total Sales]
+VAR Cost = SUMX ( Sales, Sales[Quantity] * RELATED ( 'Product Catalog'[Unit Cost] ) )
+RETURN
+    DIVIDE ( Revenue - Cost, Revenue, BLANK () )
+
+/* Rank products within their category */
+Product Rank =
+IF (
+    HASONEVALUE ( 'Product Catalog'[Name] ),
+    RANKX ( ALLSELECTED ( 'Product Catalog'[Name] ), [Total Sales],, DESC, DENSE )
+)
+
+High Value Customers =
+CALCULATE (
+    DISTINCTCOUNT ( Sales[CustomerKey] ),
+    FILTER ( VALUES ( Sales[CustomerKey] ), [Total Sales] > 10000 ),
+    Sales[Region] IN { "North", "West" },
+    KEEPFILTERS ( 'Date'[Year] = 2024 )
+)
+
+EVALUATE
+SUMMARIZECOLUMNS ( 'Date'[Year], "Sales", [Total Sales], "Label", "It""s here" )
+ORDER BY 'Date'[Year] ASC
