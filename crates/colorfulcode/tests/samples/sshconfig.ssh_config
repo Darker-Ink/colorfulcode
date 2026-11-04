@@ -1,0 +1,32 @@
+# Global defaults
+Include ~/.ssh/config.d/*
+
+Host *
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    AddKeysToAgent yes
+    IdentitiesOnly yes
+    HashKnownHosts no
+
+Host github.com gitlab.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlPersist 10m
+
+Host bastion
+    HostName 203.0.113.10
+    Port 2222
+    User=ops
+    LocalForward 5432 db.internal:5432
+
+Host *.internal !bastion
+    ProxyJump bastion
+    StrictHostKeyChecking accept-new
+    ProxyCommand ssh -W %h:%p bastion
+
+Match host "*.corp.example.com" exec "test -f ~/.corp"
+    Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com
+    SetEnv TERM=xterm-256color LANG="en_US.UTF-8"
+    ForwardAgent no

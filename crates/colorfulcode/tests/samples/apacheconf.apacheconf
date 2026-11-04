@@ -1,0 +1,32 @@
+# Virtual host for the main site
+ServerName example.com
+Listen 8080
+
+<VirtualHost *:80>
+    ServerAdmin webmaster@example.com
+    DocumentRoot "/var/www/html"
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+
+    <Directory "/var/www/html">
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    <IfModule mod_rewrite.c>
+        RewriteEngine On
+        RewriteCond %{HTTPS} off
+        RewriteCond %{HTTP_HOST} ^www\.(.*)$ [NC]
+        RewriteRule ^(.*)$ https://%1/$1 [L,R=301]
+    </IfModule>
+
+    <FilesMatch "\.(ico|png|jpe?g)$">
+        Header set Cache-Control "max-age=31536000, public"
+    </FilesMatch>
+
+    KeepAlive Off
+    Timeout 300
+    LimitRequestBody 10485760
+    Redirect permanent /old-page.html https://example.com/new#section
+</VirtualHost>

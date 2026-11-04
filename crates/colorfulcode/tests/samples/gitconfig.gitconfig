@@ -1,0 +1,40 @@
+# User wide git settings
+[user]
+	name = Jane Doe
+	email = jane@example.com
+	signingkey = ~/.ssh/id_ed25519.pub
+
+[core]
+	editor = code --wait
+	autocrlf = input
+	excludesfile = ~/.gitignore_global
+	bigFileThreshold = 512m
+
+[init]
+	defaultBranch = main
+
+[commit]
+	gpgsign = true ; sign everything
+
+[alias]
+	st = status -sb
+	lg = log --graph --oneline --decorate --all
+	undo = reset --soft HEAD~1
+	cleanup = "!git branch --merged | grep -v main | xargs git branch -d"
+	who = !git shortlog -sn --no-merges "$@"
+
+[remote "origin"]
+	url = git@github.com:example/colorful.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+
+[includeIf "gitdir:~/work/"]
+	path = ~/.gitconfig-work
+
+[diff]
+	colorMoved = zebra
+	renames = copies
+[pull]
+	rebase = yes
+[http]
+	postBuffer = 524288000
+	sslVerify

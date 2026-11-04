@@ -1,0 +1,30 @@
+# Generated build file
+ninja_required_version = 1.10
+builddir = build
+cflags = -Wall -O2 -Iinclude
+ldflags = -lm
+
+rule cc
+  command = gcc $cflags -MMD -MF $out.d -c $in -o $out
+  description = CC $out
+  depfile = $out.d
+  deps = gcc
+
+rule link
+  command = gcc $in -o $out ${ldflags}
+  description = LINK $out
+  pool = link_pool
+
+pool link_pool
+  depth = 2
+
+build $builddir/main.o: cc src/main.c
+build $builddir/lexer.o: cc src/lexer.c | include/lexer.h
+  cflags = $cflags -DLEXER_DEBUG=1
+build app: link $builddir/main.o $builddir/lexer.o || gen
+build gen: phony
+build out$ with$ spaces.txt: cc in$:put.c
+
+default app
+include rules.ninja
+subninja tests/build.ninja

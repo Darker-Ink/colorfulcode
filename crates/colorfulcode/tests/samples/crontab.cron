@@ -1,0 +1,22 @@
+# Environment for every job
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+MAILTO="ops@example.com"
+CRON_TZ=Europe/Berlin
+
+# m  h  dom mon dow  command
+*/5  *  *   *   *    /usr/local/bin/healthcheck --quiet
+0    3  *   *   *    cd /srv/app && ./backup.sh > /var/log/backup.log 2>&1
+30   2  1   *   *    find /tmp -type f -mtime +7 -delete
+15   9  *   *   1-5  echo "standup in 15 minutes" | mail -s "reminder" "$USER"
+0    0  1   jan *    /usr/local/bin/rotate-keys --year "$(date +%Y)"
+0  */6  *   *   mon,thu  [ -x /opt/sync ] && /opt/sync --full
+45 23   *   *   sun  if [ -d /srv/cache ]; then rm -rf /srv/cache/tmp; fi
+
+# Reports at the start of each quarter
+0  6  1  1,4,7,10  *  python3 /opt/reports/quarterly.py --email
+5  4  *  *  *  test -x /usr/sbin/logrotate && /usr/sbin/logrotate /etc/logrotate.conf
+
+@reboot              /usr/local/bin/start-agent
+@daily               apt-get update -qq
+@hourly              curl -fsS -m 10 --retry 5 https://hc-ping.com/abc123 > /dev/null
