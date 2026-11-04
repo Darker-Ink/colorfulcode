@@ -1,0 +1,46 @@
+=encoding UTF-8
+
+=head1 NAME
+
+Colorful::Highlight - fast syntax highlighting for Perl programs
+
+=head1 SYNOPSIS
+
+    use Colorful::Highlight;
+    my $html = highlight($code, lang => 'perl');
+    print $html, "\n";
+
+=head1 DESCRIPTION
+
+B<Colorful::Highlight> turns source code into I<colored> markup. It reads
+files such as F</etc/colorful.conf> and calls C<highlight()> for each one.
+Comparisons are written C<< $a <=> $b >> and links look like
+L<perlpod/"Formatting Codes"> or L<https://metacpan.org>.
+Use E<lt>, E<gt> and E<eacute> for special characters.X<highlighting>
+
+=head2 Functions
+
+=over 4
+
+=item C<highlight($code, %options)>
+
+Returns the highlighted markup. Options are B<lang> and B<theme>.
+
+=item * A bullet item with S<non breaking spaces>
+
+=back
+
+=begin html
+
+<p class="note">Only in <b>HTML</b> output.</p>
+
+=end html
+
+=for comment
+This paragraph is ignored by formatters.
+
+=head1 AUTHOR
+
+Ada Lovelace E<lt>ada@example.comE<gt>
+
+=cut

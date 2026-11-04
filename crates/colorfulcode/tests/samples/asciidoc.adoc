@@ -1,0 +1,51 @@
+= Getting Started with Colorful
+Ada Lovelace <ada@example.com>
+:toc: left
+:source-highlighter: colorful
+:version: 1.2
+
+// A line comment
+This guide covers *installation*, _usage_ and `configuration` of version {version}.
+See <<usage,the usage section>> or https://example.com/docs[the docs].
+
+== Installation
+
+NOTE: Python 3.8 or later is required.
+
+[source,python]
+.Hello world
+----
+def greet(name):
+    return f"Hello, {name}!"
+----
+
+=== Options
+
+* First item with **bold** and __emphasis__
+** Nested item with kbd:[Ctrl+C]
+* [x] Done task
+. Numbered step
+. Another step with link:https://example.org[a link]
+
+CPU:: The brain of the computer.
+RAM:: Short term memory. +
+
+image::diagram.png[Architecture,400]
+include::chapter2.adoc[]
+
+////
+A block comment
+spanning lines.
+////
+
+[cols="1,2"]
+|===
+| Name | Value
+| a    | 1
+|===
+
+....
+Literal text, *not* formatted.
+....
+
+'''

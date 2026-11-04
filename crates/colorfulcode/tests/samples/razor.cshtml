@@ -1,0 +1,41 @@
+@page "/orders"
+@model OrdersViewModel
+@using System.Globalization
+@inject IOrderService Orders
+
+@* Lists the orders of the current user *@
+@{
+    ViewData["Title"] = "Orders";
+    var culture = CultureInfo.GetCultureInfo("en-US");
+}
+
+<h1 class="title">@ViewData["Title"]</h1>
+
+@if (Model.Orders.Count == 0)
+{
+    <p>No orders yet. Contact support@example.com for help.</p>
+}
+else
+{
+    <table class="orders">
+        @foreach (var order in Model.Orders)
+        {
+            <tr id="order-@order.Id">
+                <td>@order.Customer.Name</td>
+                <td>@order.Total.ToString("C", culture)</td>
+                <td>@(order.Shipped ? "Shipped" : "Pending")</td>
+            </tr>
+        }
+    </table>
+}
+
+<p>Generated at @DateTime.Now.ToShortTimeString(). Twitter: @@colorfulcode</p>
+@await Html.PartialAsync("_Footer")
+
+@section Scripts {
+    <script src="~/js/orders.js"></script>
+}
+
+@functions {
+    public string Label(int count) => count == 1 ? "order" : "orders";
+}

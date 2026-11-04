@@ -1,0 +1,34 @@
+.\" Manual page for colorful(1)
+.TH COLORFUL 1 "March 2024" "colorful 1.2" "User Commands"
+.SH NAME
+colorful \- highlight source code in the terminal
+.SH SYNOPSIS
+.B colorful
+[\fB\-l\fR \fIlanguage\fR]
+[\fB\-\-theme\fR=\fIname\fR]
+.IR file ...
+.SH DESCRIPTION
+.B colorful
+reads each \fIfile\fP and writes it to standard output with
+\fBsyntax highlighting\fR applied.  \" an inline comment
+The default theme is \*(Th and the width is \n(LL units.
+.PP
+Special characters such as \(em dashes and \[u00E9] work too.
+.SS Options
+.TP
+.BR \-l ", " \-\-lang " \fIlanguage\fP"
+Force the language instead of guessing it.
+.TP
+.B \-\-list
+List all supported languages.
+.sp 2
+.IP \(bu 4
+Bullet item one.
+.RS
+.nf
+colorful \-l rust src/main.rs
+.fi
+.RE
+.SH "SEE ALSO"
+.BR bat (1),
+.BR less (1)

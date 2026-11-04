@@ -5,6 +5,7 @@ use crate::lexer::Ctx;
 
 mod c_family;
 mod data;
+mod docs;
 mod functional;
 mod markup;
 mod misc;
@@ -206,6 +207,7 @@ mod registry {
     static GROUPS: &[&[&Definition]] = &[
         c_family::LANGUAGES,
         data::LANGUAGES,
+        docs::LANGUAGES,
         functional::LANGUAGES,
         markup::LANGUAGES,
         misc::LANGUAGES,
