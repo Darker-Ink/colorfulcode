@@ -118,14 +118,14 @@ impl Language {
     pub fn find(name: &str) -> Option<Language> {
         let name = name.trim();
         let name = name.strip_prefix('.').unwrap_or(name);
-        let eq = |s: &str| s.eq_ignore_ascii_case(name);
-        let all = Language::all();
-        all.iter()
-            .find(|l| eq(l.id()))
-            .or_else(|| all.iter().find(|l| l.aliases().iter().any(|a| eq(a))))
-            .or_else(|| all.iter().find(|l| eq(l.name())))
-            .or_else(|| all.iter().find(|l| l.extensions().iter().any(|e| eq(e))))
-            .copied()
+        if name.len() > 64 {
+            return None;
+        }
+        let mut buf = [0u8; 64];
+        let lower = &mut buf[..name.len()];
+        lower.copy_from_slice(name.as_bytes());
+        lower.make_ascii_lowercase();
+        registry::names().get(&*lower).copied()
     }
 
     /// Guesses the language from a file path using its name and extension.
@@ -205,6 +205,7 @@ pub(crate) fn lang(id: &str) -> Language {
 
 mod registry {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::OnceLock;
 
     /// Every language.
@@ -288,6 +289,33 @@ mod registry {
             let mut all: Vec<Language> = GROUPS.iter().flat_map(|g| g.iter().map(|d| Language(d))).collect();
             all.sort_by_key(|l| l.id());
             all
+        })
+    }
+
+    /// Lowercase ids, aliases, names and extensions mapped to their language,
+    /// so lookups by name do not scan every language. When names collide the
+    /// stronger kind wins: id, then alias, then name, then extension.
+    pub fn names() -> &'static HashMap<Vec<u8>, Language> {
+        static NAMES: OnceLock<HashMap<Vec<u8>, Language>> = OnceLock::new();
+        NAMES.get_or_init(|| {
+            let mut map = HashMap::new();
+            let all = all();
+            let mut add = |key: &str, lang: Language| {
+                map.insert(key.to_ascii_lowercase().into_bytes(), lang);
+            };
+            for l in all {
+                l.extensions().iter().for_each(|e| add(e, *l));
+            }
+            for l in all {
+                add(l.name(), *l);
+            }
+            for l in all {
+                l.aliases().iter().for_each(|a| add(a, *l));
+            }
+            for l in all {
+                add(l.id(), *l);
+            }
+            map
         })
     }
 }
