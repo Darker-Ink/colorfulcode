@@ -1,0 +1,20 @@
+2024-01-15T10:30:00.123Z INFO  [main] Starting server on port 8080
+2024-01-15T10:30:00.456Z DEBUG [main] Loaded config from /etc/app/config.yaml
+2024-01-15 10:30:01,789 WARN  [pool-1] Connection pool is 90% full (45/50)
+2024-01-15 10:30:02,001 ERROR [worker-3] Failed to process job id=4821 user="ada" retries=3
+java.lang.NullPointerException: Cannot invoke "String.length()" because "name" is null
+	at com.example.app.Service.handle(Service.java:42)
+	at com.example.app.Worker.run(Worker.java:17)
+2024-01-15 10:30:03,100 TRACE [worker-3] took 120ms, status=failed
+2024-01-15 10:30:04,000 FATAL [main] Shutting down: OutOfMemoryError
+Jan 15 10:31:00 web01 sshd[1234]: Accepted publickey for deploy from 192.168.1.20 port 51234 ssh2
+Jan 15 10:31:05 web01 kernel: [12345.678901] eth0: link up, 1000 Mbps, full duplex
+127.0.0.1 - frank [15/Jan/2024:10:32:00 +0000] "GET /index.html HTTP/1.1" 200 2326 "https://example.com/start" "Mozilla/5.0"
+10.0.0.5 - - [15/Jan/2024:10:32:01 +0000] "POST /api/login HTTP/1.1" 401 52 "-" "curl/8.4.0"
+[2024-01-15 10:33:00] production.ERROR: SQLSTATE[HY000] Connection refused {"exception":"PDOException"}
+[2024-01-15 10:33:01] local.INFO: User logged in {"user_id":7,"admin":false}
+level=info ts=2024-01-15T10:34:00Z msg="request completed" method=GET path=/health duration=0.003s
+level=warning ts=2024-01-15T10:34:05Z msg='slow query' query_ms=1520.5
+E0115 10:35:00.000000    4321 controller.go:114] error syncing 'default/web': not found
+Warning: deprecated option --legacy will be removed in 2.0
+Info: Everything is fine, don't worry about it.
