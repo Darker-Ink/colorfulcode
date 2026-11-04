@@ -1,0 +1,1 @@
+text        "Just some plain text.\nNothing here gets highlighted: \"quotes\", 123, // comments\n"

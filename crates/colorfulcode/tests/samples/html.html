@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>colorfulcode &amp; friends</title>
+  <style>
+    body { font-family: system-ui; color: #222; }
+    .hl { background: rgb(255 240 0 / 40%); }
+  </style>
+</head>
+<body>
+  <!-- Main content -->
+  <main id="app" class="container" data-ready=true>
+    <h1>Hello, <em>world</em>!</h1>
+    <button type="button" onclick="greet('you')" disabled>Greet</button>
+    <img src="/logo.svg" alt="Logo" width="120" />
+  </main>
+  <script type="module">
+    const greet = (name) => alert(`Hello ${name}`);
+    window.greet = greet;
+  </script>
+  <script type="application/ld+json">{"@type": "WebSite"}</script>
+</body>
+</html>

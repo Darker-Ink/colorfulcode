@@ -80,9 +80,15 @@ pub fn highlight_into(code: &str, language: Language, tokens: &mut Vec<Token>) {
     let mut ctx = lexer::Ctx::new(code.as_bytes(), tokens);
     language.lex(&mut ctx);
     // Cover any trailing text.
-    let end = tokens.last().map_or(0, |t| t.end) as usize;
-    if end < code.len() {
-        tokens.push(Token { start: end as u32, end: code.len() as u32, kind: Kind::Text });
+    let len = code.len() as u32;
+    match tokens.last_mut() {
+        Some(last) if last.kind == Kind::Text => last.end = len,
+        Some(last) if last.end < len => {
+            let start = last.end;
+            tokens.push(Token { start, end: len, kind: Kind::Text });
+        }
+        None if len > 0 => tokens.push(Token { start: 0, end: len, kind: Kind::Text }),
+        _ => {}
     }
 }
 

@@ -205,14 +205,12 @@ impl<'c, 's, 'o> Markup<'c, 's, 'o> {
         ctx.emit(name_start, end, if component { Kind::Type } else { Kind::Tag });
         ctx.pos = end;
         let name = &ctx.src[name_start..end];
-        let raw_text = if closing || self.flavor == Flavor::Xml {
+        let raw_text: Option<&[u8]> = if closing || self.flavor == Flavor::Xml {
             None
         } else if name.eq_ignore_ascii_case(b"script") {
-            Some(b"script".as_slice())
+            Some(b"script")
         } else if name.eq_ignore_ascii_case(b"style") {
-            Some(b"style".as_slice())
-        } else if name.eq_ignore_ascii_case(b"textarea") || name.eq_ignore_ascii_case(b"title") {
-            None
+            Some(b"style")
         } else {
             None
         };

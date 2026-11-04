@@ -1,0 +1,10 @@
+{
+  "name": "colorfulcode",
+  "version": "0.1.0",
+  "private": false,
+  "keywords": ["syntax", "highlighting"],
+  "engines": { "node": ">=18" },
+  "score": -12.5e3,
+  "escape": "line\nbreak é",
+  "nothing": null
+}

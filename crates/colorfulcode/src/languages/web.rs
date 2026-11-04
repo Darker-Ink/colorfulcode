@@ -25,7 +25,8 @@ const JS_BUILTINS: &[&str] = &[
     "Math", "Reflect", "Intl", "Atomics",
 ];
 
-const JS_FEATURES: u32 = CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | REGEX | ARROW_FUNCTIONS | ANNOTATIONS;
+const JS_FEATURES: u32 =
+    CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | REGEX | ARROW_FUNCTIONS | ANNOTATIONS;
 
 const TS_KEYWORDS: &[&str] = &[
     "abstract", "accessor", "as", "asserts", "async", "await", "break", "case", "catch", "const", "continue",

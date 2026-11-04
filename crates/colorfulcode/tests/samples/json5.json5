@@ -1,0 +1,9 @@
+// JSON5 allows comments, unquoted keys and trailing commas.
+{
+  unquoted: 'single quotes',
+  hex: 0xdecaf,
+  leadingDot: .8675309,
+  positive: +1,
+  infinity: Infinity,
+  trailing: [1, 2, 3,],
+}

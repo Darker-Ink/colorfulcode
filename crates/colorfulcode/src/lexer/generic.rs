@@ -6,6 +6,9 @@
 //! rules. No regular expressions are involved; everything is a single forward
 //! pass over the bytes.
 
+// This module is a toolkit for the language files; not every helper is used by every build.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::{OnceLock, RwLock};
@@ -49,6 +52,8 @@ pub mod features {
     pub const UNITS: u32 = 1 << 15;
     /// `name = (args) =>` and `name = function` mark `name` as a function.
     pub const ARROW_FUNCTIONS: u32 = 1 << 16;
+    /// `Capitalized(` is a constructor or tuple struct and highlighted as a type.
+    pub const CONSTRUCTORS: u32 = 1 << 17;
 }
 
 /// String interpolation styles.
@@ -210,7 +215,7 @@ impl Spec {
             return c;
         }
         let compiled: &'static Compiled = Box::leak(Box::new(Compiled::new(self)));
-        *cache.write().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(compiled)
+        cache.write().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(compiled)
     }
 }
 
@@ -383,6 +388,9 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
     /// Lexes a nested region (an interpolation or embedded expression) until
     /// the first unbalanced `close`, which is left unconsumed.
     pub fn nested(&mut self, close: u8) {
+        if !self.ctx.can_nest() {
+            return;
+        }
         let saved = (self.prev, self.pending, self.stop_open, self.stop_close);
         self.prev = Prev::Start;
         self.pending = None;
@@ -691,10 +699,17 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         {
             return Kind::Property;
         }
+        let first = word[0];
+        if called
+            && spec.has(features::CONSTRUCTORS)
+            && first.is_ascii_uppercase()
+            && word.iter().any(|b| b.is_ascii_lowercase())
+        {
+            return Kind::Type;
+        }
         if called || (spec.has(features::ARROW_FUNCTIONS) && after == b'=' && self.function_assigned(end)) {
             return Kind::Function;
         }
-        let first = word[0];
         if spec.has(features::UPPER_CONSTANTS)
             && word.len() > 1
             && first.is_ascii_uppercase()
@@ -771,7 +786,12 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
             return;
         }
         self.ctx.pos = end;
-        let kind = self.classify(start, end);
+        let kind = if self.spec.has(features::COMMANDS) && self.ctx.at(end) == b'=' && self.ctx.at(end + 1) != b'=' {
+            // Shell assignments in argument position: `export PATH=...`, `make CC=gcc`.
+            Kind::Variable
+        } else {
+            self.classify(start, end)
+        };
         self.ctx.emit(start, end, kind);
     }
 

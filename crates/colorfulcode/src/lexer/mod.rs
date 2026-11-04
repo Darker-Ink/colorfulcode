@@ -6,6 +6,8 @@
 //! [`Kind::Text`] and adjacent tokens of the same kind are merged, so the
 //! final output always covers the whole input exactly once.
 
+#![allow(dead_code)]
+
 pub mod generic;
 
 use crate::{Kind, Language, Token};

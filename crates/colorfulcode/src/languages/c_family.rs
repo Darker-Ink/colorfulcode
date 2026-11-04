@@ -129,7 +129,7 @@ static RUST_SPEC: Spec = Spec {
     constants: &["true", "false"],
     function_keywords: &["fn"],
     type_keywords: &["struct", "enum", "trait", "type", "union"],
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | BANG_MACROS,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | BANG_MACROS,
     hook: Some(rust_hook),
     hook_chars: "'#rbc.",
     ..Spec::DEFAULT
@@ -223,7 +223,7 @@ static CPP_SPEC: Spec = Spec {
     builtins: &["std", "cout", "cin", "cerr", "endl", "stdin", "stdout", "stderr"],
     constants: &["NULL", "true", "false", "nullptr"],
     type_keywords: &["class", "struct", "enum", "union"],
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PREPROCESSOR,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PREPROCESSOR,
     hook: Some(cpp_hook),
     hook_chars: "RuUL",
     ..Spec::DEFAULT

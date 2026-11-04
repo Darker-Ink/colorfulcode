@@ -72,10 +72,6 @@ impl std::fmt::Debug for Language {
 }
 
 impl Language {
-    pub(crate) const fn from_def(def: &'static Definition) -> Language {
-        Language(def)
-    }
-
     /// Canonical identifier, for example `"typescript"`.
     pub fn id(self) -> &'static str {
         self.0.id
@@ -133,7 +129,7 @@ impl Language {
     /// ```
     /// use colorfulcode::Language;
     /// assert_eq!(Language::from_path("src/main.rs").unwrap().id(), "rust");
-    /// assert_eq!(Language::from_path("Dockerfile").unwrap().id(), "dockerfile");
+    /// assert_eq!(Language::from_path("types/index.d.ts").unwrap().id(), "typescript");
     /// ```
     pub fn from_path(path: &str) -> Option<Language> {
         let file = path.rsplit(['/', '\\']).next().unwrap_or(path);

@@ -1,0 +1,21 @@
+// Variables and mixins
+$primary: #3b82f6;
+$breakpoints: (sm: 640px, md: 768px);
+
+@mixin respond($size) {
+  @media (min-width: map-get($breakpoints, $size)) { @content; }
+}
+
+.button {
+  padding: 0.5rem 1rem;
+  background: darken($primary, 10%);
+  &--large { font-size: 1.25rem; }
+  &:hover:not(.disabled) { background: $primary; }
+  .icon + .label { margin-left: #{$gap * 2}; }
+  @include respond(md) { padding: 1rem 2rem; }
+  @extend %reset;
+}
+
+@each $name, $color in (red: #f00, green: #0f0) {
+  .text-#{$name} { color: $color; }
+}

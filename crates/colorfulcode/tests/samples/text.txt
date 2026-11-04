@@ -1,0 +1,2 @@
+Just some plain text.
+Nothing here gets highlighted: "quotes", 123, // comments

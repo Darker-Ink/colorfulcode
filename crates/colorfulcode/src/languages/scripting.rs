@@ -42,7 +42,7 @@ static PYTHON_SPEC: Spec = Spec {
     constants: &["True", "False", "None", "NotImplemented", "Ellipsis", "__debug__"],
     function_keywords: &["def"],
     type_keywords: &["class"],
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS,
     ..Spec::DEFAULT
 };
 

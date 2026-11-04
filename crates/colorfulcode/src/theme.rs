@@ -105,17 +105,12 @@ impl Theme {
         while k < Kind::COUNT {
             if !set[k] {
                 let mut cur = Kind::ALL[k];
-                loop {
-                    match cur.fallback() {
-                        Some(parent) => {
-                            if set[parent as usize] {
-                                styles[k] = styles[parent as usize];
-                                break;
-                            }
-                            cur = parent;
-                        }
-                        None => break,
+                while let Some(parent) = cur.fallback() {
+                    if set[parent as usize] {
+                        styles[k] = styles[parent as usize];
+                        break;
                     }
+                    cur = parent;
                 }
                 // Text decorations that should survive any fallback.
                 match Kind::ALL[k] {

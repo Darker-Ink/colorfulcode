@@ -1,0 +1,14 @@
+// Less variables and guards
+@base: #f938ab;
+@width: 10px;
+
+.mixin(@color; @padding: 2px) when (lightness(@color) > 50%) {
+  color: darken(@color, 20%);
+  padding: @padding;
+}
+
+.box {
+  .mixin(@base);
+  width: (@width * 2);
+  @media (min-width: 768px) { width: ~"calc(100% - @{width})"; }
+}

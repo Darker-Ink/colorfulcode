@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maven style project file -->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+  <dependencies>
+    <dependency scope="test">
+      <groupId>org.junit</groupId>
+      <artifactId>junit&#45;jupiter</artifactId>
+    </dependency>
+  </dependencies>
+  <script><![CDATA[ if (a < b) { run(); } ]]></script>
+</project>
