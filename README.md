@@ -79,7 +79,7 @@ const tokens = tokenize("const answer = 42;", "js");
 | `getLanguage(name)`, `listLanguages()` | Language info: `id`, `name`, `aliases`, `extensions`, `filenames`. |
 | `getTheme(name)`, `listThemes()` | Theme info with every color. |
 | `defineTheme(theme)` | Registers a [custom theme](#custom-themes) and returns its name. |
-| `themeCss(theme, selector?)` | CSS for class based output. Also shipped as `colorfulcode/themes/<name>.css`. |
+| `themeCss(theme, selector?)` | CSS for class based output. Also shipped as `colorfulcode/css/<name>.css`. |
 
 Unknown languages fall back to plain text.
 
@@ -158,6 +158,22 @@ With `theme: false` each token gets the class `cc-<kind>`, for example `cc-keywo
 </p>
 
 `colorful` (default), `colorful-light`, `github-dark`, `github-light`, `dracula`, `nord`, `one-dark`, `monokai`, `catppuccin-mocha`, `catppuccin-latte`, `tokyo-night`, `gruvbox-dark`, `solarized-dark`, `solarized-light`.
+
+### More themes
+
+`colorfulcode/themes` has 28 more. They are plain theme objects, not part of the WebAssembly module, so they cost nothing unless you import them:
+
+```tsx
+import { rosePine } from "colorfulcode/themes";
+
+<Code code={source} language="ts" theme={rosePine} />;
+```
+
+`rose-pine`, `rose-pine-moon`, `rose-pine-dawn`, `ayu-dark`, `ayu-mirage`, `ayu-light`, `night-owl`, `light-owl`, `palenight`, `material-darker`, `synthwave-84`, `kanagawa`, `everforest-dark`, `everforest-light`, `vitesse-dark`, `vitesse-light`, `poimandres`, `github-dark-dimmed`, `one-light`, `gruvbox-light`, `catppuccin-frappe`, `catppuccin-macchiato`, `tokyo-night-storm`, `tokyo-night-light`, `monokai-pro`, `horizon`, `panda`, `cobalt2`. Each export is the camelCase name, for example `tokyoNightStorm`.
+
+<p align="center">
+  <img src="assets/more-themes.png" alt="The themes in colorfulcode/themes" width="860">
+</p>
 
 ## Custom themes
 

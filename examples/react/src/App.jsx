@@ -1,4 +1,5 @@
 import { Code, defineTheme, getTheme, highlight, listLanguages, listThemes } from "colorfulcode/react";
+import * as moreThemes from "colorfulcode/themes";
 import { useCallback, useState } from "react";
 import { Editor } from "./Editor.jsx";
 import { samples } from "./samples.js";
@@ -22,6 +23,9 @@ defineTheme({
 });
 
 const languages = listLanguages().filter((l) => samples[l.id] !== undefined);
+const builtinCount = listThemes().length - 1; // Without "discord".
+// The optional themes from `colorfulcode/themes`.
+for (const theme of Object.values(moreThemes)) defineTheme(theme);
 const themes = listThemes();
 
 const usage = `import { Code } from "colorfulcode/react";
@@ -56,7 +60,7 @@ export default function App() {
           ))}
         </h1>
         <p className="tagline">
-          {listLanguages().length} languages, {themes.length - 1} themes, written in Rust, running as WebAssembly.
+          {listLanguages().length} languages, {builtinCount} themes, written in Rust, running as WebAssembly.
         </p>
       </header>
 
