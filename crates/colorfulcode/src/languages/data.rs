@@ -815,7 +815,8 @@ fn properties(ctx: &mut Ctx) {
                 0 | b'\n' | b'\r' => {}
                 _ => {
                     let start = ctx.pos;
-                    while !matches!(ctx.peek(), 0 | b'\n' | b'\r' | b'=' | b':' | b' ' | b'\t') {
+                    // Keys end at an unescaped separator or whitespace.
+                    while ctx.pos < line_end && !matches!(ctx.peek(), b'\r' | b'=' | b':' | b' ' | b'\t') {
                         ctx.pos += if ctx.peek() == b'\\' { 2 } else { 1 };
                     }
                     ctx.pos = ctx.pos.min(line_end);
@@ -1086,7 +1087,8 @@ const GRAPHQL_KEYWORDS: &[&str] = &[
 const GRAPHQL_TYPE_KEYWORDS: &[&str] = &["type", "interface", "union", "enum", "input", "scalar"];
 
 /// Lowercase names are fields (or arguments) unless they are keywords or
-/// calls. A name followed by `:` is always a field, even `type:`.
+/// calls. A name followed by `:` is always a field, even `type:`, and so is
+/// `type` in a selection set, where no type name follows it.
 fn graphql_hook(lx: &mut Lexer) -> bool {
     let start = lx.ctx.pos;
     let end = lx.scan_ident(start);
@@ -1096,7 +1098,7 @@ fn graphql_hook(lx: &mut Lexer) -> bool {
         let reserved = |list: &[&str]| list.iter().any(|w| w.as_bytes() == word);
         if next == b'('
             || reserved(GRAPHQL_KEYWORDS)
-            || reserved(GRAPHQL_TYPE_KEYWORDS)
+            || (reserved(GRAPHQL_TYPE_KEYWORDS) && next.is_ascii_uppercase())
             || reserved(&["true", "false", "null"])
         {
             return false;
