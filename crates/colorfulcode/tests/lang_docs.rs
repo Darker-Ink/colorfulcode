@@ -322,6 +322,39 @@ fn razor_code() {
         ],
     );
     assert_not("razor", code, "@b", Punctuation);
+    // Code blocks hold C# statements, nested blocks and markup; braces in text stay text.
+    let code = "@{\n  var n = 1;\n  if (n > 0) {\n    <b>{x}</b>\n  }\n  @:Hi @n\n}\n<p>}</p>";
+    assert_tokens(
+        "razor",
+        code,
+        &[
+            ("@{", Punctuation),
+            ("var", Type),
+            ("=", Operator),
+            ("1", Number),
+            ("if", Keyword),
+            ("{", Punctuation),
+            ("b", Tag),
+            ("{x}", Text),
+            ("}", Punctuation),
+            ("@:", Punctuation),
+            ("Hi", Text),
+            ("n", Text),
+            ("}", Punctuation),
+            ("p", Tag),
+            ("}", Text),
+        ],
+    );
+    let code = "@switch (k) {\n  case 1: <p>one</p> break;\n  default: break;\n}";
+    assert_tokens(
+        "razor",
+        code,
+        &[("case", Keyword), ("p", Tag), ("one", Text), ("break", Keyword), ("default", Keyword), ("}", Punctuation)],
+    );
+    // Strings in code may hold braces and markup.
+    let code = "@{ var s = \"}<p>\"; var v = @\"C:\\\"; }";
+    assert_tokens("razor", code, &[("\"}<p>\"", String), ("}", Punctuation)]);
+    assert_not("razor", code, "p", Tag);
 }
 
 #[test]
@@ -503,6 +536,26 @@ fn inline_markup_wraps_within_a_paragraph() {
     let code = "Some /wrapped\ntext/ and =a\nb\nc= end.";
     assert_tokens("org", code, &[("/wrapped\ntext/", Emphasis)]);
     assert_not("org", code, "=a\nb\nc=", String);
+}
+
+#[test]
+fn unclosed_template_constructs_stay_linear() {
+    let cases = [
+        ("razor", "@{ <div><a>{ if (x) { @: y\n".repeat(5_000)),
+        ("razor", "@{ <p> ".repeat(20_000)),
+        ("razor", "@if (a) { <b> } else ".repeat(10_000)),
+        ("mustache", "{{=<% %>=}} <% a ".repeat(10_000)),
+        ("liquid", "{% liquid\nassign a = 1\n".repeat(10_000)),
+        ("pug", "p #[a #[b(c=\"[\") #{d ".repeat(10_000)),
+        ("typst", "$ a(b #f( \" ".repeat(10_000)),
+        ("haml", "%p{a: \"#{b\" ".repeat(10_000)),
+        ("slim", "p a=\"#{b\" ".repeat(10_000)),
+    ];
+    for (id, code) in cases {
+        let start = std::time::Instant::now();
+        let _ = colorfulcode::highlight(&code, Language::find(id).unwrap());
+        assert!(start.elapsed().as_secs() < 2, "{id} is too slow on {:?}", &code[..20]);
+    }
 }
 
 #[test]

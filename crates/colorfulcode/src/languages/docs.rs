@@ -118,6 +118,9 @@ fn name_end(ctx: &Ctx, from: usize, extra: &[u8]) -> usize {
 /// the lexer rescan the same text again and again.
 const SCAN_LIMIT: usize = 1024;
 
+/// How many following lines wrapped inline markup may continue on.
+const WRAP_LINES: usize = 3;
+
 /// `p + SCAN_LIMIT`, capped at `len`.
 fn near(p: usize, len: usize) -> usize {
     (p + SCAN_LIMIT).min(len)
@@ -895,8 +898,8 @@ struct Tpl<'c, 's, 'o> {
     html: Html,
     /// Start of the host text not lexed yet.
     text: usize,
-    /// Open code blocks whose `}` is still to come (Razor).
-    depth: u32,
+    /// End of the range being lexed (a markup element inside a Razor code block).
+    end: usize,
 }
 
 impl Tpl<'_, '_, '_> {
@@ -1027,11 +1030,16 @@ fn tag_close(src: &[u8], from: usize, close: &[u8]) -> Option<usize> {
 fn template(ctx: &mut Ctx, t: &'static Template) {
     let start = ctx.pos;
     let len = ctx.len();
-    let mut tp = Tpl { ctx, html: Html::Text, text: start, depth: 0 };
+    let mut tp = Tpl { ctx, html: Html::Text, text: start, end: len };
+    run_template(&mut tp, t, start, len);
+}
+
+/// Lexes `[start, end)`: host text with template tags.
+fn run_template(tp: &mut Tpl, t: &'static Template, start: usize, len: usize) {
     let mut i = start;
     while i < len {
         let src = tp.ctx.src;
-        match src[i..].iter().position(|b| t.starts.contains(b)) {
+        match src[i..len].iter().position(|b| t.starts.contains(b)) {
             Some(off) => i += off,
             None => break,
         }
@@ -1042,7 +1050,7 @@ fn template(ctx: &mut Ctx, t: &'static Template) {
                     continue;
                 }
                 Body::SetDelims => {
-                    i = mustache(&mut tp, i, &d.open[..d.open.len() - 1], d.close);
+                    i = mustache(tp, i, &d.open[..d.open.len() - 1], d.close);
                     continue;
                 }
                 _ => {}
@@ -1052,13 +1060,13 @@ fn template(ctx: &mut Ctx, t: &'static Template) {
             tp.text = i;
             continue;
         }
-        match t.hook.and_then(|hook| hook(&mut tp, i)) {
+        match t.hook.and_then(|hook| hook(tp, i)) {
             Some(next) => i = next.max(i + 1),
             None => i += 1,
         }
     }
     tp.flush(len);
-    tp.ctx.pos = len;
+    tp.ctx.pos = tp.ctx.pos.max(len);
 }
 
 /// Handlebars and Go template tags: block markers and helper calls.
@@ -1443,7 +1451,7 @@ fn blade_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
 // Razor
 
 static RAZOR_TEMPLATE: Template =
-    Template { delims: &[], starts: b"@}", trim: b"", mark: Kind::Punctuation, hook: Some(razor_hook) };
+    Template { delims: &[], starts: b"@", trim: b"", mark: Kind::Punctuation, hook: Some(razor_hook) };
 
 const RAZOR_BLOCKS: &[&[u8]] = &[b"if", b"for", b"foreach", b"while", b"switch", b"lock", b"try", b"do", b"section"];
 
@@ -1452,41 +1460,31 @@ const RAZOR_DIRECTIVES: &[&[u8]] = &[
     b"removeTagHelper", b"attribute", b"rendermode", b"typeparam", b"preservewhitespace",
 ];
 
+const VOID_ELEMENTS: &[&[u8]] = &[
+    b"area", b"base", b"br", b"col", b"embed", b"hr", b"img", b"input", b"link", b"meta", b"source", b"track", b"wbr",
+];
+
 fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
     let src = tp.ctx.src;
-    let len = src.len();
-    if src[at] == b'}' {
-        // The end of a code block opened by `@if (...) {` and friends.
-        if tp.depth == 0 || !tp.ctx.at_line_start(at) {
-            return None;
-        }
-        tp.flush(at);
-        tp.depth -= 1;
-        tp.ctx.emit(at, at + 1, Kind::Punctuation);
-        let p = skip_whitespace_from(tp.ctx, at + 1);
-        let w = name_end(tp.ctx, p, b"");
-        let end = if matches!(&src[p..w], b"else" | b"catch" | b"finally" | b"while") {
-            razor_block(tp, p, w)
-        } else {
-            at + 1
-        };
-        tp.ctx.pos = end;
-        tp.text = end;
-        return Some(end);
-    }
+    let len = tp.end;
     if at > 0 && is_ident(src[at - 1]) {
         return None;
     }
-    let next = tp.ctx.at(at + 1);
+    let next = if at + 1 < len { src[at + 1] } else { 0 };
     let end = match next {
         b'@' => return Some(at + 2),
         b'*' => {
             tp.flush(at);
-            let end = tp.ctx.find(at + 2, b"*@").map_or(len, |p| p + 2);
+            let end = tp.ctx.find_in(at + 2, len, b"*@").map_or(len, |p| p + 2);
             tp.ctx.emit(at, end, Kind::Comment);
             end
         }
-        b'{' | b'(' => {
+        b'{' => {
+            tp.flush(at);
+            tp.ctx.emit(at, at + 2, Kind::Punctuation);
+            razor_code(tp, at + 2)
+        }
+        b'(' => {
             tp.flush(at);
             let close = matching(src, at + 1, len, true).unwrap_or(len);
             let ctx = &mut *tp.ctx;
@@ -1501,16 +1499,17 @@ fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
             at + 2
         }
         _ if is_ident_start(next) => {
-            let w = name_end(tp.ctx, at + 1, b"");
+            let w = name_end(tp.ctx, at + 1, b"").min(len);
             let word = &src[at + 1..w];
             tp.flush(at);
             if RAZOR_BLOCKS.contains(&word) || (word == b"using" && tp.ctx.next_non_space(w) == b'(') {
                 razor_block(tp, at, w)
             } else if word == b"code" || word == b"functions" {
+                // Class members: plain C#.
                 let ctx = &mut *tp.ctx;
                 ctx.emit(at, w, Kind::Keyword);
                 let p = skip_whitespace_from(ctx, w);
-                if ctx.at(p) == b'{' {
+                if ctx.at(p) == b'{' && p < len {
                     let c = matching(src, p, len, true).unwrap_or(len);
                     ctx.emit(p, p + 1, Kind::Punctuation);
                     ctx.embed(CSHARP, p + 1, c);
@@ -1522,7 +1521,7 @@ fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
             } else if RAZOR_DIRECTIVES.contains(&word) && tp.ctx.at_line_start(at) {
                 let ctx = &mut *tp.ctx;
                 ctx.emit(at, w, Kind::Keyword);
-                let e = ctx.line_end(w);
+                let e = ctx.line_end(w).min(len);
                 ctx.embed(CSHARP, w, e);
                 e
             } else {
@@ -1538,6 +1537,7 @@ fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
                         _ => break,
                     }
                 }
+                let e = e.min(len);
                 let ctx = &mut *tp.ctx;
                 ctx.emit(at, at + 1, Kind::Punctuation);
                 ctx.embed(CSHARP, at + 1, e);
@@ -1551,39 +1551,210 @@ fn razor_hook(tp: &mut Tpl, at: usize) -> Option<usize> {
     Some(end)
 }
 
-/// A keyword with an optional `(condition)` and a `{` that opens a block of markup.
+/// `@if (...) { ... } else { ... }` and the other block statements: a keyword
+/// with an optional `(condition)`, a code block and its continuations.
 fn razor_block(tp: &mut Tpl, start: usize, word_end: usize) -> usize {
-    let ctx = &mut *tp.ctx;
-    let src = ctx.src;
-    ctx.emit(start, word_end, Kind::Keyword);
-    let mut end = word_end;
-    let mut p = skip_whitespace_from(ctx, end);
-    if src[p..].starts_with(b"if") && !is_ident(ctx.at(p + 2)) {
-        ctx.emit(p, p + 2, Kind::Keyword);
-        end = p + 2;
-        p = skip_whitespace_from(ctx, end);
-    }
-    if ctx.at(p) == b'(' {
-        if let Some(c) = matching(src, p, near(p, src.len()), true) {
-            ctx.emit(p, p + 1, Kind::Punctuation);
-            ctx.embed(CSHARP, p + 1, c);
-            ctx.emit(c, c + 1, Kind::Punctuation);
-            end = c + 1;
-            p = skip_whitespace_from(ctx, end);
+    let src = tp.ctx.src;
+    let len = tp.end;
+    let mut word = start;
+    let mut word_end = word_end;
+    loop {
+        let ctx = &mut *tp.ctx;
+        ctx.emit(word, word_end, Kind::Keyword);
+        let mut end = word_end;
+        let mut p = skip_whitespace_from(ctx, end).min(len);
+        if src[p..len].starts_with(b"if") && !is_ident(ctx.at(p + 2)) {
+            ctx.emit(p, p + 2, Kind::Keyword);
+            end = p + 2;
+            p = skip_whitespace_from(ctx, end).min(len);
         }
-    } else if is_ident_start(ctx.at(p)) {
-        // `@section Scripts {`
-        let e = name_end(ctx, p, b"");
-        ctx.emit(p, e, Kind::Function);
-        end = e;
-        p = skip_whitespace_from(ctx, e);
-    }
-    if ctx.at(p) == b'{' {
+        if ctx.at(p) == b'(' {
+            if let Some(c) = matching(src, p, near(p, len), true) {
+                ctx.emit(p, p + 1, Kind::Punctuation);
+                ctx.embed(CSHARP, p + 1, c);
+                ctx.emit(c, c + 1, Kind::Punctuation);
+                end = c + 1;
+                p = skip_whitespace_from(ctx, end).min(len);
+            }
+        } else if is_ident_start(ctx.at(p)) && p < len {
+            // `@section Scripts {`
+            let e = name_end(ctx, p, b"").min(len);
+            ctx.emit(p, e, Kind::Function);
+            end = e;
+            p = skip_whitespace_from(ctx, e).min(len);
+        }
+        if ctx.at(p) != b'{' || p >= len {
+            return end;
+        }
         ctx.emit(p, p + 1, Kind::Punctuation);
-        tp.depth += 1;
-        end = p + 1;
+        end = razor_code(tp, p + 1);
+        // `} else {`, `} catch (e) {`, `} finally {` and `} while (x);`.
+        let p = skip_whitespace_from(tp.ctx, end).min(len);
+        let e = name_end(tp.ctx, p, b"").min(len);
+        if !matches!(&src[p..e], b"else" | b"catch" | b"finally" | b"while") {
+            return end;
+        }
+        (word, word_end) = (p, e);
     }
+}
+
+/// A code block from `from`, just after its `{`: C# statements with markup in
+/// elements and `@:` lines. Returns the end of the closing `}`.
+fn razor_code(tp: &mut Tpl, from: usize) -> usize {
+    let src = tp.ctx.src;
+    let len = tp.end;
+    if !tp.ctx.can_nest() {
+        let close = matching(src, from - 1, len, true).unwrap_or(len);
+        tp.ctx.embed(CSHARP, from, close);
+        tp.ctx.emit(close, close + 1, Kind::Punctuation);
+        return (close + 1).min(len);
+    }
+    tp.ctx.enter();
+    let mut p = from;
+    let end = loop {
+        p = skip_whitespace_from(tp.ctx, p).min(len);
+        if p >= len {
+            break len;
+        }
+        let next = tp.ctx.at(p + 1);
+        match src[p] {
+            b'}' => {
+                tp.ctx.emit(p, p + 1, Kind::Punctuation);
+                break p + 1;
+            }
+            b'<' if next.is_ascii_alphabetic() || next == b'/' => {
+                let e = razor_element_end(src, p, len);
+                razor_markup(tp, p, e);
+                p = e;
+            }
+            b'@' if next == b':' => {
+                let e = start_of_cr(tp.ctx, tp.ctx.line_end(p)).min(len);
+                tp.ctx.emit(p, p + 2, Kind::Punctuation);
+                razor_markup(tp, p + 2, e);
+                p = e;
+            }
+            b'@' if next == b'*' => {
+                let e = tp.ctx.find_in(p + 2, len, b"*@").map_or(len, |c| c + 2);
+                tp.ctx.emit(p, e, Kind::Comment);
+                p = e;
+            }
+            _ => p = razor_statement(tp, p).max(p + 1),
+        }
+    };
+    tp.ctx.leave();
+    tp.ctx.pos = end;
     end
+}
+
+/// One C# statement in a code block from `start`: up to a `;`, a nested
+/// block, an unbalanced `}` or markup. Returns where it stops.
+fn razor_statement(tp: &mut Tpl, start: usize) -> usize {
+    let src = tp.ctx.src;
+    let len = tp.end;
+    let ctx = &*tp.ctx;
+    let mut depth = 0usize;
+    let mut i = start;
+    let stop = loop {
+        if i >= len {
+            break len;
+        }
+        let b = src[i];
+        let next = ctx.at(i + 1);
+        match b {
+            b'"' | b'\'' => {
+                // Verbatim strings (`@"C:\dir"`) double their quotes instead of escaping.
+                let verbatim = b == b'"' && i > 0 && (src[i - 1] == b'@' || (i > 1 && src[i - 2] == b'@'));
+                let mut j = i + 1;
+                while j < len && src[j] != b && (verbatim || src[j] != b'\n') {
+                    j += 1 + (!verbatim && src[j] == b'\\') as usize;
+                }
+                i = j;
+            }
+            b'/' if next == b'/' => i = ctx.line_end(i).min(len),
+            b'/' if next == b'*' => i = ctx.find_in(i + 2, len, b"*/").map_or(len, |c| c + 1),
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => break i + 1,
+            b'{' | b'}' if depth == 0 => break i,
+            // Markup at the start of a line or after a label, as in `case 1: <p>`.
+            b'<' if depth == 0
+                && i > start
+                && (next.is_ascii_alphabetic() || next == b'/')
+                && (ctx.at_line_start(i) || matches!(ctx.prev_non_space(i), b':' | b';' | b'{' | b'}')) =>
+            {
+                break i;
+            }
+            b'@' if next == b':' && i > start && ctx.at_line_start(i) => break i,
+            _ => {}
+        }
+        i += 1;
+    };
+    tp.ctx.embed(CSHARP, start, stop);
+    if stop < len && src[stop] == b'{' {
+        tp.ctx.emit(stop, stop + 1, Kind::Punctuation);
+        return razor_code(tp, stop + 1);
+    }
+    stop
+}
+
+/// End of the markup element at `at` in a code block: through its matching
+/// close tag, or just the tag itself for void, self closing and close tags.
+fn razor_element_end(src: &[u8], at: usize, len: usize) -> usize {
+    let close_tag = src.get(at + 1) == Some(&b'/');
+    let name_start = at + 1 + close_tag as usize;
+    let mut name_stop = name_start;
+    while name_stop < len && (is_ident(src[name_stop]) || matches!(src[name_stop], b'-' | b':' | b'.')) {
+        name_stop += 1;
+    }
+    let name = &src[name_start..name_stop];
+    // The end of the start tag, skipping quoted attribute values.
+    let mut i = name_stop;
+    while i < len && src[i] != b'>' {
+        if matches!(src[i], b'"' | b'\'') {
+            let q = src[i];
+            i += 1;
+            while i < len && src[i] != q {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    let tag_end = (i + 1).min(len);
+    if close_tag || src[..tag_end].ends_with(b"/>") || VOID_ELEMENTS.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+        return tag_end;
+    }
+    let mut depth = 1usize;
+    let mut i = tag_end;
+    while let Some(k) = src[i..len].iter().position(|&b| b == b'<') {
+        let lt = i + k;
+        let closing = src.get(lt + 1) == Some(&b'/');
+        let n = lt + 1 + closing as usize;
+        let same = src.len() >= n + name.len()
+            && src[n..n + name.len()].eq_ignore_ascii_case(name)
+            && !src.get(n + name.len()).is_some_and(|&b| is_ident(b) || b == b'-');
+        if same && closing {
+            depth -= 1;
+            if depth == 0 {
+                return src[lt..len].iter().position(|&b| b == b'>').map_or(len, |g| lt + g + 1);
+            }
+        } else if same {
+            depth += 1;
+        }
+        i = lt + 1;
+    }
+    len
+}
+
+/// Markup inside a code block, with its own `@` expressions and blocks.
+fn razor_markup(tp: &mut Tpl, start: usize, end: usize) {
+    let (html, outer) = (tp.html, tp.end);
+    tp.html = Html::Text;
+    tp.text = start;
+    tp.end = end;
+    run_template(tp, &RAZOR_TEMPLATE, start, end);
+    tp.html = html;
+    tp.end = outer;
+    tp.text = end;
 }
 
 // reStructuredText
@@ -1841,7 +2012,7 @@ fn rst_opens(b: u8) -> bool {
 /// the line where it closes.
 fn rst_inline(ctx: &mut Ctx, start: usize, mut end: usize, wrap: bool) {
     let src = ctx.src;
-    let lines = if wrap { usize::MAX } else { 0 };
+    let lines = if wrap { WRAP_LINES } else { 0 };
     let mut i = start;
     while i < end {
         let b = src[i];
@@ -2147,7 +2318,7 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, mut end: usize) {
                     i = from;
                     continue;
                 }
-                let close = closer(ctx, from + 1, end, usize::MAX, delim, |c| {
+                let close = closer(ctx, from + 1, end, WRAP_LINES, delim, |c| {
                     !src[c - 1].is_ascii_whitespace() && (double || !ctx.at(c + 1).is_ascii_alphanumeric())
                 });
                 match close {
@@ -2198,7 +2369,9 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, mut end: usize) {
                 // Inline macros: `link:url[text]`, `kbd:[Ctrl+C]`, `footnote:[note]`.
                 let w = name_end(ctx, i, b"-");
                 if ctx.at(w) == b':' && w + 1 < end && !matches!(ctx.at(w + 1), b' ' | b':') {
-                    let target_end = src[w..end].iter().position(|&c| c == b'[' || c == b' ').map_or(end, |k| w + k);
+                    let reach = near(w, end);
+                    let target_end =
+                        src[w..reach].iter().position(|&c| c == b'[' || c == b' ').map_or(reach, |k| w + k);
                     if ctx.at(target_end) == b'[' {
                         let e = adoc_macro_text(src, target_end, end);
                         let name = &src[i..w];
@@ -3044,7 +3217,7 @@ fn interpolated_text(ctx: &mut Ctx, start: usize, end: usize, language: Language
             i = p + 1;
             continue;
         }
-        let Some(c) = matching(src, p, end, !tag) else {
+        let Some(c) = matching(src, p, (p + SCAN_LIMIT / 4).min(end), !tag) else {
             i = p + 1;
             continue;
         };
@@ -3824,8 +3997,11 @@ fn texinfo_command(ctx: &mut Ctx) {
     }
     let e = name_end(ctx, start + 1, b"-");
     let name = &src[start + 1..e];
-    let line_end = start_of_cr(ctx, ctx.line_end(e));
+    // Only commands that take the rest of the line look for its end, so a long
+    // line of inline commands stays linear.
+    let line_end = |ctx: &Ctx| start_of_cr(ctx, ctx.line_end(e));
     if (name == b"c" || name == b"comment") && matches!(ctx.at(e), b' ' | b'\t' | b'\r' | b'\n' | 0) {
+        let line_end = line_end(ctx);
         ctx.pos = line_end;
         ctx.emit(start, line_end, Kind::Comment);
         return;
@@ -3857,14 +4033,16 @@ fn texinfo_command(ctx: &mut Ctx) {
         return;
     }
     ctx.emit(start, e, Kind::Keyword);
-    let args = ctx.skip_spaces_from(e).min(line_end);
+    // Spaces never run past the end of the line.
+    let args = ctx.skip_spaces_from(e);
     if TEXINFO_SECTIONS.contains(&name) {
+        let line_end = line_end(ctx);
         ctx.pos = line_end;
         ctx.emit(args, line_end, if name == b"node" { Kind::Link } else { Kind::Heading });
         return;
     }
     if name == b"end" {
-        let w = name_end(ctx, args, b"").min(line_end);
+        let w = name_end(ctx, args, b"");
         ctx.emit(args, w, Kind::Keyword);
         ctx.pos = w;
         return;
@@ -3881,6 +4059,7 @@ fn texinfo_command(ctx: &mut Ctx) {
         return;
     };
     // Find `@end name` on its own line.
+    let line_end = line_end(ctx);
     let mut close = ctx.len();
     let mut pos = line_end;
     while let Some(p) = ctx.find(pos, b"@end ") {

@@ -20,6 +20,11 @@ else
     <table class="orders">
         @foreach (var order in Model.Orders)
         {
+            var late = order.Due < DateTime.Today && !order.Shipped;
+            if (late)
+            {
+                <tr class="late"><td colspan="3">Late: {@order.Id}</td></tr>
+            }
             <tr id="order-@order.Id">
                 <td>@order.Customer.Name</td>
                 <td>@order.Total.ToString("C", culture)</td>
@@ -31,6 +36,17 @@ else
 
 <p>Generated at @DateTime.Now.ToShortTimeString(). Twitter: @@colorfulcode</p>
 @await Html.PartialAsync("_Footer")
+
+@switch (Model.Status)
+{
+    case Status.Open:
+        <p>Open</p>
+        break;
+    default:
+        @:Closed since @Model.ClosedAt
+        <text>for @Model.Days days</text>
+        break;
+}
 
 @section Scripts {
     <script src="~/js/orders.js"></script>
