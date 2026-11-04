@@ -451,7 +451,7 @@ fn keys_without_letter_hooks() {
     assert_tokens(
         "proto",
         "enum S { S_OK = 0; }\noption (google.api.http) = { get: \"/v1\" };",
-        &[("S_OK", Property), ("get", Property)],
+        &[("S_OK", Constant), ("get", Property)],
     );
     // HCL: meta-arguments that are also in a word list, and keys inside inline objects.
     assert_tokens(

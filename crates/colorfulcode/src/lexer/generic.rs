@@ -776,6 +776,8 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         if after == b'='
             && !matches!(self.ctx.at(after_pos + 1), b'=' | b'>' | b'~')
             && (spec.has(features::ASSIGN_KEYS) || (spec.has(features::LINE_KEYS) && self.ctx.at_line_start(start)))
+            // `STATUS_ACTIVE = 1` defines a constant, not a key.
+            && !(spec.has(features::UPPER_CONSTANTS) && is_upper_constant(word))
         {
             return Kind::Property;
         }
@@ -791,11 +793,7 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         if called || (spec.has(features::ARROW_FUNCTIONS) && after == b'=' && self.function_assigned(end)) {
             return Kind::Function;
         }
-        if spec.has(features::UPPER_CONSTANTS)
-            && word.len() > 1
-            && first.is_ascii_uppercase()
-            && word.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-        {
+        if spec.has(features::UPPER_CONSTANTS) && is_upper_constant(word) {
             return Kind::Constant;
         }
         if spec.has(features::CAPITALIZED_TYPES) && first.is_ascii_uppercase() {
@@ -1385,6 +1383,13 @@ fn paren_close(src: &[u8], open: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// `ALL_CAPS` style names, at least two characters long.
+fn is_upper_constant(word: &[u8]) -> bool {
+    word.len() > 1
+        && word[0].is_ascii_uppercase()
+        && word.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// Consumes a block comment at the cursor.
