@@ -1,0 +1,25 @@
+// Storm events over the last week
+let window = 7d;
+let threshold = 1000;
+let states = dynamic(["TEXAS", "KANSAS", "OKLAHOMA"]);
+StormEvents
+| where StartTime > ago(window) and State in (states)
+| where EventType has "Tornado" or DamageProperty > threshold
+| extend Duration = EndTime - StartTime, Day = bin(StartTime, 1d)
+| project-away EpisodeNarrative, EventNarrative
+| summarize Events = count(), Damage = sum(DamageProperty), Longest = max(Duration) by State, Day
+| top 10 by Damage desc
+| render timechart
+
+// Join with a reference table
+let Regions = datatable(State: string, Region: string) [
+    "TEXAS", "South",
+    "KANSAS", "Midwest"
+];
+StormEvents
+| join kind=inner Regions on State
+| mv-expand Tags = todynamic(Tags)
+| extend Path = @"C:\data\storms", Label = strcat("Region: ", Region, "\n")
+| make-series Total = count() default = 0 on StartTime from datetime(2024-01-01) to now() step 1h
+| where isnotempty(Label) and Total != 0.5e2
+| take 100
