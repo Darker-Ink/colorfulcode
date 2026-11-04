@@ -243,7 +243,7 @@ struct Word {
 
 /// FxHash, a tiny and fast hash for short keys.
 #[derive(Default)]
-struct FxHasher(u64);
+pub(crate) struct FxHasher(u64);
 
 impl Hasher for FxHasher {
     #[inline]
