@@ -395,6 +395,8 @@ fn key_colon(lx: &mut Lexer, skip: &[&str]) -> bool {
     ctx.emit(ws, pos, Kind::Property);
     ctx.token(1, Kind::Punctuation);
     lx.mark_operator();
+    // `class:` and `def:` as keys must not name the next word.
+    lx.set_pending(None);
     true
 }
 

@@ -537,6 +537,13 @@ fn python_format_strings() {
 fn interpolation_fixes() {
     assert_not("ruby", "x = a ? b: c", "b", Property);
     assert_tokens("ruby", "f? b: 1", &[("b", Property)]);
+    assert_tokens("ruby", "f(class: i.even?)", &[("class", Property), ("i", Text)]);
+    assert_tokens(
+        "ruby",
+        "link_to \"x\", class: \"btn\", def: y",
+        &[("class", Property), ("def", Property), ("y", Text)],
+    );
+    assert_not("ruby", "f(class: i.even?)", "i", Type);
     assert_tokens("ruby", "r = /a#{x}b/i", &[("/a", Regex), ("#{", Punctuation), ("x", Text), ("b/i", Regex)]);
     assert_tokens("ruby", "s.split(/ /)", &[("/ /", Regex)]);
     assert_tokens(
