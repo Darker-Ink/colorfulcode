@@ -152,6 +152,8 @@ fn scan_quoted(lx: &mut Lexer, start: usize, from: usize, limit: usize, open: u8
     let mut seg = start;
     let mut depth = 0u32;
     let mut i = from;
+    // Cleared after an unbalanced interpolation so a run of openers stays linear.
+    let mut interp = q.interp;
     while i < limit {
         let b = ctx.src[i];
         if b == q.escape && b != 0 {
@@ -171,9 +173,13 @@ fn scan_quoted(lx: &mut Lexer, start: usize, from: usize, limit: usize, open: u8
             seg = end;
             continue;
         }
-        if !q.interp.is_empty() && ctx.starts_with_at(i, q.interp) {
-            let open_at = i + q.interp.len() - 1;
-            if let Some(c) = bracket_close(ctx.src, open_at).filter(|&c| c < limit) {
+        if !interp.is_empty() && ctx.starts_with_at(i, interp) {
+            let open_at = i + interp.len() - 1;
+            let close = bracket_close(ctx.src, open_at).filter(|&c| c < limit);
+            if close.is_none() {
+                interp = b"";
+            }
+            if let Some(c) = close {
                 ctx.emit(seg, i, q.kind);
                 if q.embed_brackets {
                     ctx.embed_spec(spec, i, c + 1);
@@ -305,10 +311,11 @@ fn key_colon(lx: &mut Lexer, skip: &[&str]) -> bool {
 fn arrow_ahead(ctx: &Ctx, from: usize, arrows: &[&[u8]]) -> bool {
     let mut i = ctx.skip_spaces_from(from);
     if ctx.at(i) == b'(' {
-        let limit = ctx.line_end(i).min(i + 512);
+        let limit = (i + 512).min(ctx.len());
         let mut depth = 0;
         while i < limit {
             match ctx.src[i] {
+                b'\n' => return false,
                 b'(' => depth += 1,
                 b')' => {
                     depth -= 1;
@@ -763,7 +770,10 @@ fn perl_quote_op(lx: &mut Lexer) -> bool {
     }
     if pos > 0 {
         let prev = ctx.src[pos - 1];
-        if is_ident(prev) || matches!(prev, b'$' | b'@' | b'%' | b'&') || (prev == b'>' && ctx.at(pos - 2) == b'-') {
+        if is_ident(prev)
+            || matches!(prev, b'$' | b'@' | b'%' | b'&')
+            || (prev == b'>' && pos >= 2 && ctx.src[pos - 2] == b'-')
+        {
             return false;
         }
     }
@@ -774,7 +784,7 @@ fn perl_quote_op(lx: &mut Lexer) -> bool {
         } else {
             let next = lx.ctx.skip_spaces_from(stop);
             match lx.ctx.at(next) {
-                o @ (b'{' | b'(' | b'[' | b'<' | b'/' | b'|' | b'#' | b'!') if o != 0 => quote(lx, next, next, q),
+                b'{' | b'(' | b'[' | b'<' | b'/' | b'|' | b'#' | b'!' => quote(lx, next, next, q),
                 _ => stop,
             }
         };
@@ -857,7 +867,7 @@ fn perl_subscript(lx: &mut Lexer) -> bool {
     let prev = ctx.src[pos - 1];
     let subscript = match prev {
         b'}' | b']' => true,
-        b'>' => ctx.at(pos - 2) == b'-',
+        b'>' => pos >= 2 && ctx.src[pos - 2] == b'-',
         _ if is_ident(prev) => {
             let mut s = pos - 1;
             while s > 0 && is_ident(ctx.src[s - 1]) {
@@ -1196,7 +1206,8 @@ static MOONSCRIPT_SPEC: Spec = Spec {
     builtins: LUA_BUILTINS,
     constants: &["nil", "true", "false"],
     variables: &["self", "super"],
-    sigils: &[(b'@', Kind::Variable)],
+    // `{ :name }` is shorthand for `{ name: name }`.
+    sigils: &[(b'@', Kind::Variable), (b':', Kind::Property)],
     features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | IDENT_KEYS,
     hook: Some(moon_hook),
     hook_chars: "[\\=:.",
@@ -1225,17 +1236,14 @@ fn r_hook(lx: &mut Lexer) -> bool {
             lx.mark_value();
             true
         }
-        b'%' => {
-            let line = ctx.line_end(pos);
-            match ctx.src[pos + 1..line].iter().take(16).position(|&b| b == b'%' || b == b' ') {
-                Some(i) if ctx.src[pos + 1 + i] == b'%' => {
-                    emit_to(lx, pos + i + 2, Kind::Operator);
-                    lx.mark_operator();
-                    true
-                }
-                _ => false,
+        b'%' => match ctx.src[pos + 1..].iter().take(16).position(|&b| matches!(b, b'%' | b' ' | b'\n')) {
+            Some(i) if ctx.src[pos + 1 + i] == b'%' => {
+                emit_to(lx, pos + i + 2, Kind::Operator);
+                lx.mark_operator();
+                true
             }
-        }
+            _ => false,
+        },
         b'\\' if ctx.at(pos + 1) == b'(' => {
             lx.ctx.token(1, Kind::Keyword);
             true
@@ -1809,6 +1817,11 @@ pub static GDSCRIPT: Definition = Definition::new("gdscript", "GDScript", Engine
 
 const AHK_STRING: Quote = Quote::new(Kind::String).escape(b'`').single_line();
 
+/// Offset of the first `::` in `line`.
+fn double_colon(line: &[u8]) -> Option<usize> {
+    line.windows(2).position(|w| w == b"::")
+}
+
 /// Hotkeys (`^j::`), hotstrings (`::btw::`) and labels on a line starting at the cursor.
 fn ahk_line_label(lx: &mut Lexer) -> bool {
     let ctx = &*lx.ctx;
@@ -1820,7 +1833,7 @@ fn ahk_line_label(lx: &mut Lexer) -> bool {
         let Some(opts) = line[1..].iter().position(|&b| b == b':') else {
             return false;
         };
-        let Some(sep) = ctx.find(pos + opts + 2, b"::").filter(|&p| p < line_end) else {
+        let Some(sep) = double_colon(&line[opts + 2..]).map(|i| pos + opts + 2 + i) else {
             return false;
         };
         emit_to(lx, sep + 2, Kind::Meta);
@@ -1831,7 +1844,7 @@ fn ahk_line_label(lx: &mut Lexer) -> bool {
         }
         return true;
     }
-    if let Some(sep) = ctx.find(pos, b"::").filter(|&p| p < line_end && p > pos && p - pos <= 40) {
+    if let Some(sep) = double_colon(line).filter(|&i| i > 0 && i <= 40).map(|i| pos + i) {
         if ctx.src[pos..sep].iter().any(|b| matches!(b, b'"' | b'\'' | b'(' | b'=' | b',' | b'%' | b'.')) {
             return false;
         }

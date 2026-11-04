@@ -3,8 +3,38 @@
 mod common;
 
 use colorfulcode::Kind::*;
-use colorfulcode::Language;
+use colorfulcode::{highlight, Language};
 use common::{assert_not, assert_tokens};
+
+const IDS: &[&str] = &[
+    "python", "ruby", "perl", "lua", "r", "julia", "elixir", "crystal", "nim", "coffeescript", "tcl", "gdscript",
+    "mojo", "raku", "autohotkey", "applescript", "wren", "squirrel", "pony", "moonscript", "livescript",
+];
+
+/// Every pair of fragments that trigger the hand written rules, at the very
+/// start of input and after other text, must lex without panicking and cover
+/// the whole input.
+#[test]
+fn hook_fragments_never_panic() {
+    const FRAGMENTS: &[&str] = &[
+        ">", "->", "q(", "s{a}", "{a}", "<<~", "<<'", "<<E", "%w", "%(", "~r", "~S\"\"\"", "#`(", "=begin", "=cut",
+        "[==[", "--[[", ":\"", "$#", "$", "@[", "@", "%", "&", "r\"", "raw\"", "'", "\"", "\\", "#{", "%(", "{.", "#[",
+        "#=", "..", "-", "a-b", "self.", "def ", "function M", ":", "::", "=>", "=", "\n", " ", "x", "1", "`", "é",
+        "__END__", "proc ", "[", "]", "}", ")",
+    ];
+    for id in IDS {
+        let lang = Language::find(id).unwrap();
+        for a in FRAGMENTS {
+            for b in FRAGMENTS {
+                for code in [format!("{a}{b}"), format!("{a}{b}{a}"), format!("x {a}{b}")] {
+                    let hl = highlight(&code, lang);
+                    let end = hl.tokens().last().map_or(0, |t| t.end as usize);
+                    assert_eq!(end, code.len(), "{id}: {code:?}");
+                }
+            }
+        }
+    }
+}
 
 #[test]
 fn lookups() {
