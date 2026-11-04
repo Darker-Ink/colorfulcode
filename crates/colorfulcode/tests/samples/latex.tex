@@ -1,0 +1,41 @@
+% A short article with math, lists and code.
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, graphicx}
+
+\newcommand{\R}{\mathbb{R}}
+\def\eps{\varepsilon}
+
+\title{Notes on \LaTeX{} Highlighting}
+\author{Ada Lovelace}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}\label{sec:intro}
+This is \emph{emphasized} and \textbf{bold} text with 50\% less noise.
+See Section~\ref{sec:intro} and \cite[p.~4]{knuth1984}; visit \url{https://ctan.org}.
+Inline math $f(x) = x^2 + 2x_1 - 3.5$ and display math:
+$$\int_0^1 \frac{\sin x}{x}\,dx \approx 0.946$$
+
+\subsection*{Equations}
+\begin{equation}
+  e^{i\pi} + 1 = 0 \quad \text{and} \quad \sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}
+\end{equation}
+
+\begin{itemize}
+  \item First item with \verb|\raw{code}| inside
+  \item Second item \\ with a line break
+\end{itemize}
+
+\begin{lstlisting}[language=Python]
+def square(x):
+    return x * x  # not a TeX comment
+\end{lstlisting}
+
+\begin{tabular}{|l|r|}
+  Name & Value \\ \hline
+  $\alpha$ & 0.5 \\
+\end{tabular}
+
+\end{document}

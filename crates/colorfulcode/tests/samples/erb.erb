@@ -1,0 +1,28 @@
+<%# app/views/posts/index.html.erb %>
+<% content_for :title, "All posts" %>
+<h1 class="title"><%= t("posts.heading") %></h1>
+
+<% if @posts.any? %>
+  <table class="posts">
+    <% @posts.each_with_index do |post, i| -%>
+      <tr class="<%= i.even? ? 'even' : 'odd' %>" id="post_<%= post.id %>">
+        <td><%= link_to post.title, post_path(post) %></td>
+        <td><%= post.published_at&.strftime("%Y-%m-%d") || "draft" %></td>
+        <td><%== post.body_html %></td>
+        <td><%= number_with_delimiter(post.views * 2) %></td>
+      </tr>
+    <% end -%>
+  </table>
+<% else %>
+  <p>No posts yet. <%= link_to "Write one", new_post_path, class: "btn" %></p>
+<% end %>
+
+<%= form_with model: Post.new do |f| %>
+  <%= f.text_field :title, placeholder: "Title" %>
+  <%= f.submit "Save" %>
+<% end %>
+
+<p>Literal tag: <%% not ruby %></p>
+<script>
+  window.postCount = <%= @posts.size %>;
+</script>

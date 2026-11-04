@@ -1,0 +1,35 @@
+{# templates/blog/index.html.twig #}
+{% extends 'base.html.twig' %}
+{% import 'macros.html.twig' as forms %}
+
+{% block title %}Blog ({{ posts|length }}){% endblock %}
+
+{% block body %}
+  <h1 class="title">{{ 'blog.title'|trans }}</h1>
+  {% for post in posts|filter(p => p.published) %}
+    <article id="post-{{ post.id }}">
+      <h2>{{ post.title|upper }}</h2>
+      <time>{{ post.createdAt|date("Y-m-d H:i") }}</time>
+      <p>{{ post.body|striptags|slice(0, 200) ~ '...' }}</p>
+      {% if post.tags is not empty %}
+        <ul>{% for tag in post.tags %}<li>{{ tag.name }}</li>{% endfor %}</ul>
+      {% endif %}
+      <a href="{{ path('post_show', {slug: post.slug}) }}">Read more</a>
+    </article>
+  {% else %}
+    <p>No posts found.</p>
+  {% endfor %}
+
+  {% set greeting = "Hello #{user.name ?? 'guest'}!" %}
+  <p>{{ greeting }} You have {{ count * 2 + 1 }} items.</p>
+  {{ forms.input('email', null, 'email') }}
+  {{ include('sidebar.html.twig', {items: menu}, with_context = false) }}
+
+  {% verbatim %}
+    <p>Use {{ variable }} in your templates.</p>
+  {% endverbatim %}
+
+  {%- apply spaceless -%}
+    <div> <strong>{{ loop is defined ? 'in loop' : 'outside' }}</strong> </div>
+  {%- endapply -%}
+{% endblock %}

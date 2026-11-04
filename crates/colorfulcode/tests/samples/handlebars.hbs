@@ -1,0 +1,34 @@
+{{!-- The post list partial --}}
+<div class="entry {{#if featured}}featured{{/if}}" id="post-{{id}}">
+  <h1>{{title}}</h1>
+  {{! a short comment }}
+  {{#if author}}
+    <p class="byline">By {{author.firstName}} {{author.lastName}}</p>
+  {{else if anonymous}}
+    <p>Anonymous</p>
+  {{else}}
+    <p>Unknown author</p>
+  {{/if}}
+
+  <div class="body">{{{body}}}</div>
+
+  <ul>
+    {{#each comments as |comment index|}}
+      <li class="{{#if @first}}first{{/if}}">
+        {{index}}: {{comment.text}} by {{../author.name}}
+        {{formatDate comment.date "YYYY-MM-DD" locale="en"}}
+      </li>
+    {{~else~}}
+      <li>No comments</li>
+    {{/each}}
+  </ul>
+
+  {{> userCard user=author size=48 }}
+  {{#with (lookup people 0)}}
+    {{link "View profile" href=url class="btn"}}
+  {{/with}}
+  {{#unless published}}<em>Draft</em>{{/unless}}
+  \{{escaped}} stays literal
+  {{^items}}Nothing here{{/items}}
+  {{log "Rendered post" level="info"}}
+</div>

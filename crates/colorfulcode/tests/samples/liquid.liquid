@@ -1,0 +1,39 @@
+{% comment %}
+  Product grid for the collection page.
+{% endcomment %}
+{% assign products_per_row = 4 %}
+{%- capture title -%}{{ collection.title | upcase }}{%- endcapture -%}
+
+<section class="collection" data-count="{{ collection.products.size }}">
+  <h1>{{ title }}</h1>
+  {% if collection.description != blank %}
+    <div class="rte">{{ collection.description }}</div>
+  {% endif %}
+
+  {% paginate collection.products by 12 %}
+  <ul class="grid">
+    {% for product in collection.products limit: 8 offset: 2 %}
+      <li class="grid__item{% if forloop.first %} grid__item--first{% endif %}">
+        <a href="{{ product.url | within: collection }}">
+          <img src="{{ product.featured_image | img_url: '300x300', crop: 'center' }}" alt="{{ product.title | escape }}">
+          <span>{{ product.title }}</span>
+          <span class="price">{{ product.price | money_with_currency }}</span>
+        </a>
+        {% unless product.available %}<em>Sold out</em>{% endunless %}
+      </li>
+    {% else %}
+      <li>No products yet.</li>
+    {% endfor %}
+  </ul>
+  {% endpaginate %}
+
+  {% case template.name %}
+    {% when 'collection' %}
+      {% render 'breadcrumbs', page: collection, show_home: true %}
+    {% when 'search' %}
+      <p>Results for "{{ search.terms }}"</p>
+  {% endcase %}
+
+  {% raw %}{{ this is not parsed }}{% endraw %}
+  {{ 'now' | date: '%Y' | plus: 1 }} &copy; {{ shop.name }}
+</section>

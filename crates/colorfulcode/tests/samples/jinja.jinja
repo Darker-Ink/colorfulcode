@@ -1,0 +1,39 @@
+{# Base layout for the blog #}
+{% extends "base.html" %}
+{% from "macros.html" import render_field with context %}
+
+{% macro card(post, featured=false) -%}
+  <article class="card{% if featured %} featured{% endif %}" data-id="{{ post.id }}">
+    <h2><a href="{{ url_for('post', slug=post.slug) }}">{{ post.title | title }}</a></h2>
+    <p>{{ post.summary|truncate(120, true) }}</p>
+  </article>
+{%- endmacro %}
+
+{% block content %}
+<main>
+  <h1>{{ page.title ~ " (" ~ posts|length ~ ")" }}</h1>
+  {% for post in posts if not post.draft %}
+    {{ card(post, featured=loop.first) }}
+    <span class="index">{{ loop.index }} of {{ loop.length }}</span>
+  {% else %}
+    <p class="empty">No posts yet.</p>
+  {% endfor %}
+
+  {% set total = posts | sum(attribute="views") %}
+  <p>Total views: {{ "{:,}".format(total) }} &amp; counting</p>
+
+  {% if user is defined and user.is_admin %}
+    <a href="/admin">Admin</a>
+  {% elif user %}
+    <a href="/profile">{{ user.name | e }}</a>
+  {% endif %}
+
+  {% raw %}
+    <p>Shown as is: {{ not_a_variable }}</p>
+  {% endraw %}
+</main>
+<script>
+  const posts = {{ posts | tojson }};
+  console.log("loaded", posts.length);
+</script>
+{% endblock %}

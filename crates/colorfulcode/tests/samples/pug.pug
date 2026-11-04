@@ -1,0 +1,39 @@
+//- views/users.pug: the user list
+doctype html
+include mixins/card.pug
+
+mixin userCard(user, featured)
+  .card(class={featured: featured}, data-id=user.id)
+    h2= user.name
+    p.bio #{user.bio} and !{user.html}
+
+html(lang="en")
+  head
+    title= `Users (${users.length})`
+    style.
+      .card { color: #333; }
+  body#main.page
+    // A comment that is rendered as HTML
+    h1.title Users
+    - const active = users.filter(u => u.active)
+    if active.length > 0
+      ul
+        each user, i in active
+          li(class=i % 2 === 0 ? "even" : "odd")
+            +userCard(user, i === 0)
+    else if users.length
+      p No active users.
+    else
+      p.empty No users at all.
+    a(href="/users/new" title='New user') Add user
+    p: em Inline nesting with #[strong a tag] inside.
+    | Plain text with #{count} items
+    case role
+      when "admin"
+        p You can edit.
+      default
+        p Read only.
+    script.
+      console.log("loaded", 42);
+    block footer
+      footer &copy; 2024

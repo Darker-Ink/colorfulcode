@@ -1,0 +1,27 @@
+<%# views/users.ejs %>
+<%- include('partials/header', { title: "Users" }) %>
+<h1><%= title %></h1>
+
+<% if (users.length > 0) { %>
+  <ul class="users">
+    <% users.forEach(function (user, i) { %>
+      <li class="<%= i % 2 === 0 ? 'even' : 'odd' %>" data-id="<%= user.id %>">
+        <a href="/users/<%= encodeURIComponent(user.name) %>"><%= user.name %></a>
+        <span>Joined <%= new Date(user.created).toLocaleDateString() %></span>
+      </li>
+    <% }); %>
+  </ul>
+<% } else { %>
+  <p>No users found.</p>
+<% } %>
+
+<%_ const total = users.reduce((n, u) => n + u.posts, 0); _%>
+<p>Total posts: <%= total.toFixed(0) %></p>
+<p>Escaped tag: <%% literal %></p>
+<%- body /* unescaped HTML */ -%>
+
+<script>
+  const users = <%- JSON.stringify(users) %>;
+  console.log(`loaded ${users.length} users`);
+</script>
+<%- include('partials/footer') %>

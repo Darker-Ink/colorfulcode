@@ -1,0 +1,46 @@
+\input texinfo
+@c colorful.texi: the manual
+@setfilename colorful.info
+@settitle Colorful Manual
+@set VERSION 1.2
+
+@node Top
+@top Colorful
+
+This manual is for @command{colorful}, version @value{VERSION}.
+It highlights @emph{many} languages and is @strong{fast}.
+
+@menu
+* Overview::    What it does.
+* Invoking::    Command line options.
+@end menu
+
+@node Overview
+@chapter Overview
+@cindex overview
+
+Use @code{colorful -l rust} to force a language; see @ref{Invoking}.
+Files such as @file{~/.colorfulrc} hold settings for @var{user}.
+Braces are written as @{ and @}, and an at sign as @@.
+Visit @uref{https://example.com, the web site}@dots{}
+
+@example
+colorful --theme dark src/main.rs
+@end example
+
+@itemize @bullet
+@item First item
+@item Second item with @kbd{C-c}
+@end itemize
+
+@ignore
+This text is not part of the output.
+@end ignore
+
+@section Invoking
+@table @option
+@item -l @var{language}
+Set the language.
+@end table
+
+@bye

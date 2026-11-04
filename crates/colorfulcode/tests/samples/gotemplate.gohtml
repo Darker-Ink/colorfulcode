@@ -1,0 +1,40 @@
+{{/* layout.gohtml: the page layout */}}
+{{ define "layout" }}
+<!DOCTYPE html>
+<html lang="{{ .Lang | default "en" }}">
+<head>
+  <title>{{ block "title" . }}{{ .Site.Title }}{{ end }}</title>
+</head>
+<body class="{{ if .Dark }}dark{{ else }}light{{ end }}">
+  {{- template "nav" . -}}
+  <main>
+    {{ with .User }}
+      <p>Hello, {{ .Name | html }}! You have {{ len .Messages }} messages.</p>
+    {{ else }}
+      <p><a href="/login">Sign in</a></p>
+    {{ end }}
+
+    <ul>
+    {{ range $i, $post := .Posts }}
+      <li class="{{ if eq (mod $i 2) 0 }}even{{ else }}odd{{ end }}">
+        <a href="/posts/{{ $post.Slug }}">{{ $post.Title }}</a>
+        <time>{{ $post.Date.Format "2006-01-02" }}</time>
+        {{ formatTags $post.Tags ", " }}
+      </li>
+    {{ else }}
+      <li>No posts.</li>
+    {{ end }}
+    </ul>
+
+    {{ $total := 0 }}
+    {{ if and .ShowStats (gt .Count 10) }}
+      <p>{{ printf "%d posts, %.1f%% read" .Count .Ratio }}</p>
+    {{ end }}
+    <pre>{{ `raw string with {{ braces }}` }}</pre>
+  </main>
+  <script>
+    const site = {{ $.Site.Title }};
+  </script>
+</body>
+</html>
+{{ end }}
