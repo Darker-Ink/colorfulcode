@@ -1,0 +1,43 @@
+@startuml
+!include <C4/C4_Container>
+!define PRIMARY #1E90FF
+' Sequence of a checkout
+title Checkout flow
+skinparam backgroundColor #EEEBDC
+
+actor Customer as C
+participant "Web Shop" as W <<Frontend>>
+database Orders #LightBlue
+
+/' Multi-line
+   comment '/
+C -> W : Add item to cart
+activate W
+W --> C : Cart updated
+C ->> W : Checkout
+alt payment ok
+    W -> Orders : INSERT order
+    Orders --> W : order id
+else declined
+    W -[#red]> C : Payment failed
+end
+deactivate W
+note right of W : Uses the "payments" API
+
+class Order <<Entity>> {
+  - id : UUID
+  + total : Decimal
+  + submit() : void
+}
+Order "1" *-- "many" LineItem : contains
+Order <|-- SpecialOrder
+
+start
+:Receive order;
+if (in stock?) then (yes)
+  :Ship it;
+else (no)
+  :Back order;
+endif
+stop
+@enduml

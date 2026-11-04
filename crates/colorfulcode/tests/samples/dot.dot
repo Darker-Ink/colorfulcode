@@ -1,0 +1,32 @@
+// Build pipeline
+#pragma style
+strict digraph Pipeline {
+    graph [rankdir=LR, fontname="Helvetica", splines=ortho];
+    node [shape=box, style="rounded,filled", fillcolor="#e8f0fe"];
+    edge [color=gray40, arrowsize=0.8];
+
+    /* Stages */
+    source [label="Source\ncode", shape=folder];
+    build [label=<<b>Build</b><br/>cargo build>];
+    test;
+    deploy [shape=doubleoctagon, penwidth=2.5];
+
+    source -> build -> test;
+    test -> deploy [label="on success", weight=10];
+    test -> source [label="on failure", style=dashed, constraint=false];
+
+    subgraph cluster_checks {
+        label = "Checks";
+        color = blue;
+        lint; fmt; audit;
+        lint -> fmt -> audit;
+    }
+
+    "quoted node" -> audit:n [headport=s];
+    { rank = same; build; lint; }
+}
+
+graph Undirected {
+    a -- b -- c;
+    b -- d [len=1.5];
+}

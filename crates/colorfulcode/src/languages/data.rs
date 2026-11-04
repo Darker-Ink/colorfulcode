@@ -7,7 +7,7 @@ use crate::Kind;
 
 pub static LANGUAGES: &[&Definition] = &[
     &YAML, &TOML, &INI, &PROPERTIES, &DOTENV, &CSV, &TSV, &SQL, &GRAPHQL, &DIFF, &PROTOBUF, &THRIFT, &HCL, &PRISMA,
-    &HTTP,
+    &HTTP, &CYPHER, &SPARQL, &KDL, &CUE, &JSONNET, &DOT, &MERMAID, &PLANTUML, &LOG, &REGEX,
 ];
 
 // Shared helpers
@@ -1538,4 +1538,1040 @@ fn http_text(ctx: &mut Ctx, end: usize, kind: Kind) {
     let e = trim_end(ctx.src, seg, end);
     ctx.emit(seg, e, kind);
     ctx.pos = end;
+}
+
+/// Retags the identifier that ends at `end` as `kind`. Returns false if there
+/// is no identifier there.
+fn retag_word(lx: &mut Lexer, end: usize, kind: Kind) -> bool {
+    let mut start = end;
+    while start > 0 && lx.is_ident_byte(lx.ctx.src[start - 1]) {
+        start -= 1;
+    }
+    if start == end || lx.ctx.src[start].is_ascii_digit() {
+        return false;
+    }
+    lx.ctx.truncate_to(start);
+    lx.ctx.emit(start, end, kind);
+    true
+}
+
+// Cypher
+
+/// Labels and relationship types (`:Person`, `[:KNOWS]`) and map keys (`{name: ...}`).
+fn cypher_hook(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    let next = lx.ctx.peek_at(1);
+    if is_ident_start(next) || next == b'`' {
+        let end = if next == b'`' {
+            let line_end = lx.ctx.line_end(start);
+            lx.ctx.src[start + 2..line_end].iter().position(|&b| b == b'`').map_or(line_end, |i| start + 2 + i + 1)
+        } else {
+            lx.scan_ident(start + 1)
+        };
+        lx.ctx.emit(start, start + 1, Kind::Punctuation);
+        lx.ctx.emit(start + 1, end, Kind::Type);
+        lx.ctx.pos = end;
+        lx.mark_value();
+        return true;
+    }
+    if matches!(next, b' ' | b'\t') && retag_word(lx, start, Kind::Property) {
+        lx.ctx.token(1, Kind::Punctuation);
+        lx.mark_operator();
+        return true;
+    }
+    false
+}
+
+static CYPHER_SPEC: Spec = Spec {
+    line_comments: &["//"],
+    block_comments: &[("/*", "*/")],
+    strings: &[Str::quoted("'"), Str::quoted("\""), Str::quoted("`").raw().kind(Kind::Property)],
+    keywords: &[
+        "match", "optional", "where", "return", "with", "create", "merge", "delete", "detach", "set", "remove",
+        "unwind", "order", "by", "skip", "limit", "as", "and", "or", "not", "xor", "in", "is", "distinct", "case",
+        "when", "then", "else", "end", "on", "call", "yield", "union", "all", "asc", "desc", "ascending", "descending",
+        "starts", "ends", "contains", "exists", "foreach", "load", "csv", "from", "headers", "constraint", "index",
+        "unique", "drop", "using", "periodic", "commit", "explain", "profile", "assert", "require", "for", "if", "key",
+        "node", "transactions", "any", "none", "single",
+    ],
+    builtins: &[
+        "count", "collect", "size", "length", "coalesce", "id", "labels", "type", "keys", "nodes", "relationships",
+        "properties", "tolower", "toupper", "tostring", "tointeger", "tofloat", "range", "head", "last", "tail", "sum",
+        "avg", "min", "max", "timestamp", "date", "datetime", "duration", "point", "split", "replace", "substring",
+        "trim", "elementid", "startnode", "endnode", "shortestpath", "allshortestpaths",
+    ],
+    constants: &["true", "false", "null"],
+    sigils: &[(b'$', Kind::Variable)],
+    operators: "+-*/%=<>|^!~:",
+    case_insensitive: true,
+    features: CALLS | MEMBERS,
+    hook: Some(cypher_hook),
+    hook_chars: ":",
+    ..Spec::DEFAULT
+};
+
+pub static CYPHER: Definition = Definition::new("cypher", "Cypher", Engine::Generic(&CYPHER_SPEC))
+    .aliases(&["neo4j", "opencypher"])
+    .extensions(&["cypher", "cyp"]);
+
+// SPARQL
+
+/// IRIs (`<http://...>`), prefixed names (`foaf:name`) and blank nodes (`_:b0`).
+fn sparql_hook(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    if ctx.peek() == b'<' {
+        let line_end = ctx.line_end(start);
+        let mut i = start + 1;
+        while i < line_end && !matches!(ctx.src[i], b'>' | b' ' | b'\t' | b'<' | b'"' | b'{' | b'}' | b'\r') {
+            i += 1;
+        }
+        if ctx.at(i) != b'>' {
+            return false;
+        }
+        ctx.pos = i + 1;
+        ctx.emit(start, i + 1, Kind::String);
+        lx.mark_value();
+        return true;
+    }
+    let name = |ctx: &Ctx, mut i: usize| {
+        while is_ident(ctx.at(i)) || ctx.at(i) == b'-' || (ctx.at(i) == b'.' && is_ident(ctx.at(i + 1))) {
+            i += 1;
+        }
+        i
+    };
+    let colon = name(ctx, start);
+    if ctx.at(colon) != b':' {
+        return false;
+    }
+    let end = name(ctx, colon + 1);
+    if &ctx.src[start..colon] == b"_" {
+        ctx.emit(start, end, Kind::Variable);
+    } else {
+        ctx.emit(start, colon + 1, Kind::Type);
+        ctx.emit(colon + 1, end, Kind::Property);
+    }
+    ctx.pos = end;
+    lx.mark_value();
+    true
+}
+
+static SPARQL_SPEC: Spec = Spec {
+    line_comments: &["#"],
+    strings: &[Str::quoted("\"\"\"").multiline(), Str::quoted("'''").multiline(), Str::quoted("\""), Str::quoted("'")],
+    keywords: &[
+        "select", "construct", "describe", "ask", "where", "from", "named", "prefix", "base", "optional", "filter",
+        "union", "minus", "graph", "service", "bind", "values", "order", "by", "group", "having", "limit", "offset",
+        "distinct", "reduced", "as", "asc", "desc", "not", "exists", "in", "insert", "delete", "data", "with", "using",
+        "load", "clear", "drop", "create", "add", "move", "copy", "silent", "default", "all", "into", "a", "undef",
+    ],
+    builtins: &[
+        "str", "lang", "langmatches", "datatype", "bound", "iri", "uri", "bnode", "regex", "contains", "strstarts",
+        "strends", "strlen", "substr", "count", "sum", "min", "max", "avg", "sample", "group_concat", "concat",
+        "ucase", "lcase", "now", "year", "month", "day", "coalesce", "if", "isiri", "isuri", "isblank", "isliteral",
+        "isnumeric", "replace", "abs", "round",
+    ],
+    constants: &["true", "false"],
+    sigils: &[(b'?', Kind::Variable), (b'$', Kind::Variable), (b'@', Kind::Meta)],
+    operators: "=!<>&|+-*/^",
+    case_insensitive: true,
+    features: CALLS,
+    hook: Some(sparql_hook),
+    hook_chars: "<:_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    ..Spec::DEFAULT
+};
+
+pub static SPARQL: Definition =
+    Definition::new("sparql", "SPARQL", Engine::Generic(&SPARQL_SPEC)).aliases(&["rq"]).extensions(&["sparql", "rq"]);
+
+// KDL
+
+pub static KDL: Definition = Definition::new("kdl", "KDL", Engine::Custom(kdl)).extensions(&["kdl"]);
+
+/// Bytes that end a bare KDL identifier or value.
+fn kdl_delimiter(b: u8) -> bool {
+    is_blank(b) || matches!(b, b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'/' | b'\\' | b'"' | b';' | b'=' | b'#')
+}
+
+fn kdl(ctx: &mut Ctx) {
+    // Whether the next word is a node name.
+    let mut node = true;
+    while !ctx.done() {
+        let start = ctx.pos;
+        match ctx.peek() {
+            b'\n' => {
+                ctx.pos += 1;
+                node = true;
+            }
+            b' ' | b'\t' | b'\r' => ctx.pos += 1,
+            b';' | b'{' | b'}' => {
+                ctx.token(1, Kind::Punctuation);
+                node = true;
+            }
+            b'/' if ctx.peek_at(1) == b'/' => line_comment(ctx),
+            b'/' if ctx.peek_at(1) == b'*' => crate::lexer::generic::block_comment(ctx, "/*", "*/", true),
+            b'/' if ctx.peek_at(1) == b'-' => kdl_slashdash(ctx, node),
+            b'(' => {
+                // Type annotation: `(u8)`, `(date)"2024-01-01"`.
+                let line_end = ctx.line_end(start);
+                let close = ctx.src[start..line_end].iter().position(|&b| b == b')').map(|i| start + i);
+                ctx.emit(start, start + 1, Kind::Punctuation);
+                ctx.emit(start + 1, close.unwrap_or(line_end), Kind::Type);
+                ctx.pos = line_end;
+                if let Some(close) = close {
+                    ctx.emit(close, close + 1, Kind::Punctuation);
+                    ctx.pos = close + 1;
+                }
+            }
+            b'=' => ctx.token(1, Kind::Operator),
+            b'\\' => {
+                // Line continuation: the node goes on after the newline.
+                ctx.token(1, Kind::Operator);
+                ctx.skip_spaces();
+                if ctx.starts_with(b"//") {
+                    line_comment(ctx);
+                }
+                ctx.skip_spaces();
+                if ctx.peek() == b'\r' {
+                    ctx.pos += 1;
+                }
+                if ctx.peek() == b'\n' {
+                    ctx.pos += 1;
+                }
+            }
+            b'"' => {
+                if ctx.starts_with(b"\"\"\"") {
+                    delimited(ctx, 3, b"\"\"\"", true, Kind::String);
+                } else {
+                    quoted(ctx, Kind::String, ESC | MULTI);
+                }
+                kdl_retag(ctx, start, node);
+                node = false;
+            }
+            b'#' | b'r' if kdl_raw_string(ctx) => {
+                kdl_retag(ctx, start, node);
+                node = false;
+            }
+            b'#' => {
+                // `#true`, `#false`, `#null`, `#inf`, `#-inf`, `#nan`.
+                let mut end = start + 1;
+                while !kdl_delimiter(ctx.at(end)) {
+                    end += 1;
+                }
+                ctx.pos = end;
+                ctx.emit(start, end, Kind::Constant);
+                node = false;
+            }
+            _ => {
+                let mut end = start;
+                while end < ctx.len() && !kdl_delimiter(ctx.at(end)) {
+                    end += 1;
+                }
+                if end == start {
+                    ctx.bump_char();
+                    continue;
+                }
+                let word = &ctx.src[start..end];
+                let kind = if ctx.at(end) == b'=' {
+                    Kind::Attribute
+                } else if node {
+                    Kind::Tag
+                } else if matches!(word, b"true" | b"false" | b"null") {
+                    Kind::Constant
+                } else if is_number(word) {
+                    Kind::Number
+                } else {
+                    Kind::String
+                };
+                ctx.pos = end;
+                ctx.emit(start, end, kind);
+                node = false;
+            }
+        }
+    }
+}
+
+/// Raw strings: `r"..."`, `r#"..."#` (KDL 1) and `#"..."#` (KDL 2).
+fn kdl_raw_string(ctx: &mut Ctx) -> bool {
+    let start = ctx.pos;
+    let mut i = start + (ctx.peek() == b'r') as usize;
+    let hashes = ctx.src[i..].iter().take_while(|&&b| b == b'#').count();
+    i += hashes;
+    if ctx.at(i) != b'"' || (hashes == 0 && ctx.peek() != b'r') {
+        return false;
+    }
+    let mut close = Vec::with_capacity(hashes + 1);
+    close.push(b'"');
+    close.resize(hashes + 1, b'#');
+    let end = ctx.find(i + 1, &close).map_or(ctx.len(), |p| p + close.len());
+    ctx.pos = end;
+    ctx.emit(start, end, Kind::String);
+    true
+}
+
+/// A string used as a node name or property key.
+fn kdl_retag(ctx: &mut Ctx, start: usize, node: bool) {
+    let kind = if ctx.peek() == b'=' {
+        Kind::Attribute
+    } else if node {
+        Kind::Tag
+    } else {
+        return;
+    };
+    let end = ctx.pos;
+    ctx.truncate_to(start);
+    ctx.emit(start, end, kind);
+}
+
+/// `/-` comments out the next node, argument, property or children block.
+fn kdl_slashdash(ctx: &mut Ctx, node: bool) {
+    let start = ctx.pos;
+    let mut i = ctx.skip_spaces_from(start + 2);
+    let mut depth = 0u32;
+    while i < ctx.len() {
+        match ctx.src[i] {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => break,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 && !node {
+                    i += 1;
+                    break;
+                }
+            }
+            b'\n' | b';' if depth == 0 && node => break,
+            b' ' | b'\t' | b'\n' | b';' if depth == 0 && !node => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    ctx.pos = i.max(start + 2);
+    ctx.emit(start, ctx.pos, Kind::Comment);
+}
+
+// CUE
+
+/// Raw strings: `#"..."#`, `##"..."##` and their multi-line forms.
+fn cue_hook(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    let hashes = ctx.src[start..].iter().take_while(|&&b| b == b'#').count();
+    let open = start + hashes;
+    if ctx.at(open) != b'"' {
+        return false;
+    }
+    let quotes = if ctx.starts_with_at(open, b"\"\"\"") { 3 } else { 1 };
+    let mut close = vec![b'"'; quotes];
+    close.resize(quotes + hashes, b'#');
+    let end = ctx.find(open + quotes, &close).map_or(ctx.len(), |p| p + close.len());
+    ctx.pos = end;
+    ctx.emit(start, end, Kind::String);
+    lx.mark_value();
+    true
+}
+
+static CUE_SPEC: Spec = Spec {
+    line_comments: &["//"],
+    strings: &[
+        Str::quoted("\"\"\"").multiline().interp(Interp::BackslashParen),
+        Str::quoted("'''").multiline().interp(Interp::BackslashParen),
+        Str::quoted("\"").interp(Interp::BackslashParen),
+        Str::quoted("'").interp(Interp::BackslashParen),
+    ],
+    keywords: &["package", "import", "for", "in", "if", "let"],
+    types: &[
+        "string", "int", "float", "bool", "bytes", "number", "uint", "rune", "int8", "int16", "int32", "int64",
+        "int128", "uint8", "uint16", "uint32", "uint64", "uint128", "float32", "float64",
+    ],
+    builtins: &["len", "close", "and", "or", "div", "mod", "quo", "rem"],
+    constants: &["true", "false", "null", "_"],
+    ident_suffix: "?!",
+    sigils: &[(b'#', Kind::Type)],
+    operators: "+-*/=!<>&|?~",
+    features: CALLS | MEMBERS | IDENT_KEYS | STRING_KEYS | ANNOTATIONS,
+    hook: Some(cue_hook),
+    hook_chars: "#",
+    ..Spec::DEFAULT
+};
+
+pub static CUE: Definition = Definition::new("cue", "CUE", Engine::Generic(&CUE_SPEC)).extensions(&["cue"]);
+
+// Jsonnet
+
+static JSONNET_VERBATIM: [Str; 2] =
+    [Str::quoted("\"").raw().doubled().multiline(), Str::quoted("'").raw().doubled().multiline()];
+
+/// The root object `$`, verbatim strings (`@"..."`) and field separators
+/// (`name::`, `name+:`), which mark the field name as a property.
+fn jsonnet_hook(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    match lx.ctx.peek() {
+        b'$' => {
+            lx.ctx.token(1, Kind::Variable);
+            lx.mark_value();
+            true
+        }
+        b'@' => {
+            let rule = match lx.ctx.peek_at(1) {
+                b'"' => &JSONNET_VERBATIM[0],
+                b'\'' => &JSONNET_VERBATIM[1],
+                _ => return false,
+            };
+            lx.ctx.pos += 1;
+            lx.string(start, rule, true, Interp::None);
+            true
+        }
+        b => {
+            let plus = (b == b'+') as usize;
+            let mut end = start + plus;
+            while lx.ctx.at(end) == b':' && end - start - plus < 3 {
+                end += 1;
+            }
+            let colons = end - start - plus;
+            if colons == 0 || (colons == 1 && plus == 0) || !retag_word(lx, start, Kind::Property) {
+                return false;
+            }
+            lx.ctx.pos = end;
+            lx.ctx.emit(start, end, Kind::Punctuation);
+            lx.mark_operator();
+            true
+        }
+    }
+}
+
+static JSONNET_SPEC: Spec = Spec {
+    line_comments: &["//", "#"],
+    block_comments: &[("/*", "*/")],
+    strings: &[Str::new("|||", "|||").raw().multiline(), Str::quoted("\"").multiline(), Str::quoted("'").multiline()],
+    keywords: &[
+        "local", "function", "if", "then", "else", "for", "in", "import", "importstr", "importbin", "assert", "error",
+        "tailstrict",
+    ],
+    variables: &["self", "super"],
+    builtins: &["std"],
+    constants: &["true", "false", "null"],
+    operators: "+-*/%=&|^!<>~",
+    features: CALLS | MEMBERS | IDENT_KEYS | STRING_KEYS,
+    hook: Some(jsonnet_hook),
+    hook_chars: "$@+:",
+    ..Spec::DEFAULT
+};
+
+pub static JSONNET: Definition = Definition::new("jsonnet", "Jsonnet", Engine::Generic(&JSONNET_SPEC))
+    .aliases(&["libsonnet"])
+    .extensions(&["jsonnet", "libsonnet"]);
+
+// Graphviz DOT
+
+/// Attributes (`shape=box`), HTML labels (`<<b>bold</b>>`) and `#` lines.
+fn dot_hook(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    match lx.ctx.peek() {
+        b'#' if lx.ctx.at_line_start(start) => {
+            line_comment(lx.ctx);
+            true
+        }
+        b'#' => false,
+        b'<' => {
+            if lx.ctx.prev_non_space(start) != b'=' {
+                return false;
+            }
+            let mut depth = 0u32;
+            let mut i = start;
+            while i < lx.ctx.len() {
+                match lx.ctx.src[i] {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            lx.ctx.pos = i;
+            lx.ctx.emit(start, i, Kind::String);
+            lx.mark_value();
+            true
+        }
+        _ => {
+            let end = lx.scan_ident(start);
+            let eq = lx.ctx.skip_spaces_from(end);
+            if lx.ctx.at(eq) != b'=' {
+                return false;
+            }
+            lx.ctx.emit(start, end, Kind::Attribute);
+            lx.ctx.emit(eq, eq + 1, Kind::Operator);
+            let value = lx.ctx.skip_spaces_from(eq + 1);
+            if is_ident_start(lx.ctx.at(value)) {
+                let value_end = lx.scan_ident(value);
+                lx.ctx.emit(value, value_end, Kind::String);
+                lx.ctx.pos = value_end;
+                lx.mark_value();
+            } else {
+                lx.ctx.pos = eq + 1;
+                lx.mark_operator();
+            }
+            true
+        }
+    }
+}
+
+static DOT_SPEC: Spec = Spec {
+    line_comments: &["//"],
+    block_comments: &[("/*", "*/")],
+    strings: &[Str::quoted("\"").multiline()],
+    keywords: &["node", "edge", "strict"],
+    type_keywords: &["graph", "digraph", "subgraph"],
+    operators: "-=>",
+    case_insensitive: true,
+    hook: Some(dot_hook),
+    hook_chars: "#<abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
+    ..Spec::DEFAULT
+};
+
+pub static DOT: Definition =
+    Definition::new("dot", "DOT", Engine::Generic(&DOT_SPEC)).aliases(&["graphviz", "gv"]).extensions(&["dot", "gv"]);
+
+// Mermaid
+
+/// Directives (`%%{init: ...}%%`), node shapes (`A[label]`, `B((circle))`),
+/// edge labels (`-->|label|`) and message text after `: `.
+fn mermaid_hook(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    let line_end = ctx.line_end(start);
+    match ctx.peek() {
+        b'%' => {
+            if !ctx.starts_with(b"%%{") {
+                return false;
+            }
+            let end = ctx.find(start, b"}%%").map_or(line_end, |p| p + 3);
+            ctx.pos = end;
+            ctx.emit(start, end, Kind::Meta);
+        }
+        b'[' | b'(' | b'{' | b'>' => {
+            if start == 0 || !is_ident(ctx.src[start - 1]) {
+                return false;
+            }
+            let mut open_end = start + 1;
+            while open_end - start < 3 && matches!(ctx.at(open_end), b'[' | b'(' | b'{' | b'/' | b'\\') {
+                open_end += 1;
+            }
+            let mut close = open_end;
+            let mut in_quotes = false;
+            while close < line_end {
+                match ctx.src[close] {
+                    b'"' => in_quotes = !in_quotes,
+                    b']' | b')' | b'}' if !in_quotes => break,
+                    _ => {}
+                }
+                close += 1;
+            }
+            if close >= line_end {
+                return false;
+            }
+            let mut text_end = close;
+            while text_end > open_end && matches!(ctx.src[text_end - 1], b'/' | b'\\') {
+                text_end -= 1;
+            }
+            let mut end = close;
+            while end < line_end && end - close < 3 && matches!(ctx.src[end], b']' | b')' | b'}') {
+                end += 1;
+            }
+            ctx.emit(start, open_end, Kind::Punctuation);
+            ctx.emit(open_end, text_end, Kind::String);
+            ctx.emit(text_end, end, Kind::Punctuation);
+            ctx.pos = end;
+        }
+        b'|' => {
+            if start == 0 || !matches!(ctx.src[start - 1], b'>' | b'-' | b'=' | b'.') {
+                return false;
+            }
+            let Some(close) = ctx.src[start + 1..line_end].iter().position(|&b| b == b'|').map(|i| start + 1 + i)
+            else {
+                return false;
+            };
+            ctx.emit(start, start + 1, Kind::Punctuation);
+            ctx.emit(start + 1, close, Kind::String);
+            ctx.emit(close, close + 1, Kind::Punctuation);
+            ctx.pos = close + 1;
+        }
+        b':' => {
+            if !matches!(ctx.peek_at(1), b' ' | b'\t') {
+                return false;
+            }
+            let text = ctx.skip_spaces_from(start + 1);
+            let text_end = trim_end(ctx.src, text, line_end);
+            ctx.emit(start, start + 1, Kind::Punctuation);
+            let kind = if is_number(&ctx.src[text..text_end]) { Kind::Number } else { Kind::String };
+            ctx.emit(text, text_end, kind);
+            ctx.pos = line_end;
+        }
+        _ => return false,
+    }
+    lx.mark_value();
+    true
+}
+
+static MERMAID_SPEC: Spec = Spec {
+    line_comments: &["%%"],
+    strings: &[Str::quoted("\"").raw()],
+    keywords: &[
+        "graph", "flowchart", "subgraph", "end", "direction", "TB", "TD", "BT", "RL", "LR", "sequenceDiagram",
+        "classDiagram", "stateDiagram", "erDiagram", "gantt", "pie", "journey", "gitGraph", "mindmap", "timeline",
+        "quadrantChart", "requirementDiagram", "sankey", "participant", "actor", "as", "loop", "alt", "else", "opt",
+        "par", "and", "critical", "break", "rect", "note", "over", "left", "right", "of", "activate", "deactivate",
+        "autonumber", "class", "classDef", "style", "linkStyle", "click", "callback", "state", "section", "title",
+        "dateFormat", "axisFormat", "excludes", "todayMarker", "commit", "branch", "checkout", "merge", "namespace",
+        "accTitle", "accDescr", "showData", "box", "create", "destroy",
+    ],
+    constants: &["true", "false"],
+    operators: "-=.<>~&*+",
+    hook: Some(mermaid_hook),
+    hook_chars: "%[({>|:",
+    ..Spec::DEFAULT
+};
+
+pub static MERMAID: Definition = Definition::new("mermaid", "Mermaid", Engine::Generic(&MERMAID_SPEC))
+    .aliases(&["mmd"])
+    .extensions(&["mmd", "mermaid"]);
+
+// PlantUML
+
+/// Colors (`#Red`), stereotypes (`<<Entity>>`), activities (`:step;`) and
+/// message text after `: `.
+fn plantuml_hook(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    let line_end = ctx.line_end(start);
+    match ctx.peek() {
+        b'#' => {
+            let mut end = start + 1;
+            while is_ident(ctx.at(end)) {
+                end += 1;
+            }
+            if end == start + 1 {
+                return false;
+            }
+            ctx.pos = end;
+            ctx.emit(start, end, Kind::Constant);
+        }
+        b'<' if !ctx.starts_with(b"<<") => {
+            // Standard library includes: `!include <C4/C4_Container>`.
+            let line_start = ctx.skip_spaces_from(start - column(ctx, start));
+            let close = ctx.src[start..line_end].iter().position(|&b| b == b'>');
+            match close {
+                Some(c) if ctx.starts_with_at(line_start, b"!include") => {
+                    ctx.pos = start + c + 1;
+                    ctx.emit(start, ctx.pos, Kind::String);
+                }
+                _ => return false,
+            }
+        }
+        b'<' => {
+            let Some(close) = ctx.find(start + 2, b">>").filter(|&c| c < line_end) else {
+                return false;
+            };
+            ctx.pos = close + 2;
+            ctx.emit(start, ctx.pos, Kind::Meta);
+        }
+        b':' if ctx.at_line_start(start) => {
+            let close =
+                ctx.src[start..line_end].iter().position(|&b| matches!(b, b';' | b'|' | b'<')).map(|i| start + i);
+            let text_end = close.unwrap_or(line_end);
+            ctx.emit(start, start + 1, Kind::Punctuation);
+            ctx.emit(start + 1, text_end, Kind::String);
+            ctx.pos = text_end;
+            if ctx.peek() == b';' {
+                ctx.token(1, Kind::Punctuation);
+            }
+        }
+        b':' if matches!(ctx.peek_at(1), b' ' | b'\t') => {
+            let text = ctx.skip_spaces_from(start + 1);
+            ctx.emit(start, start + 1, Kind::Punctuation);
+            ctx.emit(text, trim_end(ctx.src, text, line_end), Kind::String);
+            ctx.pos = line_end;
+        }
+        _ => return false,
+    }
+    lx.mark_value();
+    true
+}
+
+static PLANTUML_SPEC: Spec = Spec {
+    line_comments: &["'"],
+    block_comments: &[("/'", "'/")],
+    strings: &[Str::quoted("\"").raw()],
+    keywords: &[
+        "participant", "actor", "boundary", "control", "entity", "database", "collections", "queue", "class",
+        "interface", "abstract", "enum", "annotation", "package", "namespace", "note", "as", "of", "over", "left",
+        "right", "top", "bottom", "end", "if", "then", "else", "elseif", "endif", "while", "endwhile", "repeat",
+        "fork", "again", "start", "stop", "kill", "detach", "title", "skinparam", "activate", "deactivate", "return",
+        "alt", "opt", "loop", "group", "par", "break", "critical", "usecase", "component", "node", "rectangle",
+        "state", "object", "hide", "show", "legend", "header", "footer", "newpage", "autonumber", "extends",
+        "implements", "partition", "split", "box", "ref", "create", "destroy", "frame", "cloud", "folder", "artifact",
+        "card", "storage", "agent", "map", "json", "is", "endlegend", "endnote", "direction", "to",
+    ],
+    sigils: &[(b'@', Kind::Meta), (b'!', Kind::Meta), (b'$', Kind::Variable)],
+    operators: "-<>|*.+=\\/~",
+    features: CAPITALIZED_TYPES,
+    hook: Some(plantuml_hook),
+    hook_chars: "#<:",
+    ..Spec::DEFAULT
+};
+
+pub static PLANTUML: Definition = Definition::new("plantuml", "PlantUML", Engine::Generic(&PLANTUML_SPEC))
+    .aliases(&["puml"])
+    .extensions(&["puml", "plantuml", "pu", "iuml", "wsd"]);
+
+// Log files
+
+pub static LOG: Definition = Definition::new("log", "Log", Engine::Custom(log)).aliases(&["logs"]).extensions(&["log"]);
+
+/// The kind used for a log level word, if `word` is one.
+fn log_level(word: &[u8]) -> Option<Kind> {
+    let mut buf = [0u8; 9];
+    if word.len() > buf.len() {
+        return None;
+    }
+    let upper = &mut buf[..word.len()];
+    upper.copy_from_slice(word);
+    upper.make_ascii_uppercase();
+    let kind = match &*upper {
+        b"ERROR" | b"FATAL" | b"CRITICAL" => Kind::Deleted,
+        b"WARN" | b"WARNING" => Kind::Constant,
+        b"INFO" | b"NOTICE" => Kind::Inserted,
+        b"DEBUG" | b"TRACE" => Kind::Comment,
+        // Abbreviations and rarer levels only count when written in capitals.
+        _ if word != upper => return None,
+        b"ERR" | b"CRIT" | b"SEVERE" | b"PANIC" | b"EMERG" | b"ALERT" | b"FAILED" | b"FAIL" => Kind::Deleted,
+        b"WRN" => Kind::Constant,
+        b"INF" => Kind::Inserted,
+        b"DBG" | b"VERBOSE" | b"FINE" | b"FINER" | b"FINEST" => Kind::Comment,
+        _ => return None,
+    };
+    // Accept `ERROR`, `Error` and `error`, but not `eRRor`.
+    (word == upper || word[1..].iter().all(u8::is_ascii_lowercase)).then_some(kind)
+}
+
+fn log(ctx: &mut Ctx) {
+    const MONTHS: &[&[u8]] =
+        &[b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec"];
+    while !ctx.done() {
+        let start = ctx.pos;
+        let b = ctx.peek();
+        match b {
+            b'"' => quoted(ctx, Kind::String, ESC),
+            b'\'' if start == 0 || !ctx.src[start - 1].is_ascii_alphanumeric() => {
+                let line_end = ctx.line_end(start);
+                let close = ctx.src[start + 1..line_end].iter().position(|&b| b == b'\'').map(|i| start + 1 + i);
+                match close {
+                    Some(c) if !ctx.at(c + 1).is_ascii_alphanumeric() => {
+                        ctx.pos = c + 1;
+                        ctx.emit(start, ctx.pos, Kind::String);
+                    }
+                    _ => ctx.pos += 1,
+                }
+            }
+            b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'|' => ctx.token(1, Kind::Punctuation),
+            _ if b.is_ascii_alphanumeric() || b == b'_' => {
+                let word_char =
+                    |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-' | b'/' | b'$');
+                let mut end = start;
+                while word_char(ctx.at(end)) {
+                    end += 1;
+                }
+                // Keep trailing punctuation out of the word: `done.` or `at 10:30:00:`.
+                while end > start + 1 && matches!(ctx.at(end - 1), b'.' | b':' | b'-' | b'/') {
+                    end -= 1;
+                }
+                let word = &ctx.src[start..end];
+                let kind = if word
+                    .iter()
+                    .position(|&b| b == b':')
+                    .is_some_and(|i| ctx.starts_with_at(start + i, b"://"))
+                {
+                    // A URL runs to the next space or closing delimiter.
+                    while !is_blank(ctx.at(end)) && !matches!(ctx.at(end), b'"' | b'\'' | b'<' | b'>' | b')' | b']') {
+                        end += 1;
+                    }
+                    Kind::Link
+                } else if b.is_ascii_digit() {
+                    // Dates, times, IP addresses, durations and plain numbers.
+                    if ctx.at(end) == b' '
+                        && ctx.at(end + 1).is_ascii_digit()
+                        && ctx.at(end + 3) == b':'
+                        && is_date(word)
+                    {
+                        end += 1;
+                        while word_char(ctx.at(end)) {
+                            end += 1;
+                        }
+                    }
+                    // Java style milliseconds: `10:30:00,123`.
+                    if ctx.at(end) == b',' && ctx.at(end + 1).is_ascii_digit() && ctx.src[start..end].contains(&b':') {
+                        end += 1;
+                        while ctx.at(end).is_ascii_digit() {
+                            end += 1;
+                        }
+                    }
+                    Kind::Number
+                } else if let Some(kind) = log_level(word) {
+                    kind
+                } else if let Some(kind) = word.iter().rposition(|&b| b == b'.').and_then(|dot| {
+                    log_level(&word[dot + 1..])
+                        .filter(|_| word[dot + 1..].iter().all(u8::is_ascii_uppercase))
+                        .map(|k| (dot, k))
+                }) {
+                    // `production.ERROR`: only the level is colored.
+                    let (dot, kind) = kind;
+                    ctx.emit(start, start + dot + 1, Kind::Text);
+                    ctx.pos = end;
+                    ctx.emit(start + dot + 1, end, kind);
+                    continue;
+                } else if MONTHS.contains(&word) && ctx.at(end) == b' ' && ctx.next_non_space(end).is_ascii_digit() {
+                    Kind::Number
+                } else if ctx.at(end) == b'=' {
+                    Kind::Property
+                } else if matches!(word, b"true" | b"false" | b"null" | b"nil" | b"None" | b"undefined") {
+                    Kind::Constant
+                } else if (word.ends_with(b"Exception") || word.ends_with(b"Error"))
+                    && word.rsplit(|&b| b == b'.').next().is_some_and(|w| w.first().is_some_and(u8::is_ascii_uppercase))
+                {
+                    Kind::Type
+                } else {
+                    Kind::Text
+                };
+                ctx.pos = end;
+                ctx.emit(start, end, kind);
+            }
+            _ => ctx.bump_char(),
+        }
+    }
+}
+
+// Regular expressions
+
+pub static REGEX: Definition = Definition::new("regex", "Regular Expression", Engine::Custom(regex))
+    .aliases(&["regexp"])
+    .extensions(&["regex", "regexp"]);
+
+/// A pattern on its own, optionally written as `/pattern/flags`.
+fn regex(ctx: &mut Ctx) {
+    let mut end = ctx.len();
+    let mut flags = None;
+    if ctx.peek() == b'/' {
+        let text_end = trim_end(ctx.src, ctx.pos, ctx.len());
+        if let Some(last) = ctx.src[ctx.pos + 1..text_end].iter().rposition(|&b| b == b'/').map(|i| ctx.pos + 1 + i) {
+            if ctx.src[last + 1..text_end].iter().all(u8::is_ascii_alphabetic) {
+                ctx.token(1, Kind::Punctuation);
+                end = last;
+                flags = Some(text_end);
+            }
+        }
+    }
+    regex_body(ctx, end);
+    if let Some(flags_end) = flags {
+        ctx.pos = end;
+        ctx.token(1, Kind::Punctuation);
+        ctx.emit(end + 1, flags_end, Kind::Keyword);
+        ctx.pos = flags_end;
+    }
+}
+
+fn regex_body(ctx: &mut Ctx, end: usize) {
+    let mut extended = false;
+    // Start of the current character class contents, if inside one.
+    let mut class: Option<usize> = None;
+    while ctx.pos < end {
+        let start = ctx.pos;
+        let b = ctx.peek();
+        if let Some(class_start) = class {
+            match b {
+                b'\\' => regex_escape(ctx, end),
+                b']' if start > class_start => {
+                    ctx.token(1, Kind::Punctuation);
+                    class = None;
+                }
+                b'[' if ctx.peek_at(1) == b':' => {
+                    let close = ctx.find(start + 2, b":]").filter(|&c| c < end).map_or(start + 1, |c| c + 2);
+                    ctx.pos = close;
+                    ctx.emit_from(start, Kind::Builtin);
+                }
+                b'-' if start > class_start && ctx.peek_at(1) != b']' => ctx.token(1, Kind::Operator),
+                _ => {
+                    ctx.bump_char();
+                    ctx.emit_from(start, Kind::String);
+                }
+            }
+            continue;
+        }
+        match b {
+            b'\\' => regex_escape(ctx, end),
+            b'[' => {
+                ctx.token(1, Kind::Punctuation);
+                if ctx.peek() == b'^' {
+                    ctx.token(1, Kind::Operator);
+                }
+                class = Some(ctx.pos);
+            }
+            b'(' => {
+                ctx.token(1, Kind::Punctuation);
+                if ctx.peek() == b'?' {
+                    extended |= regex_group(ctx, end);
+                }
+            }
+            b')' => ctx.token(1, Kind::Punctuation),
+            b'*' | b'+' | b'?' => {
+                ctx.pos += 1;
+                if matches!(ctx.peek(), b'?' | b'+') && ctx.pos < end {
+                    ctx.pos += 1;
+                }
+                ctx.emit_from(start, Kind::Operator);
+            }
+            b'{' => {
+                let mut i = start + 1;
+                while i < end && (ctx.src[i].is_ascii_digit() || ctx.src[i] == b',') {
+                    i += 1;
+                }
+                if i > start + 1 && ctx.at(i) == b'}' && i < end {
+                    ctx.pos = i + 1;
+                    if ctx.pos < end && matches!(ctx.peek(), b'?' | b'+') {
+                        ctx.pos += 1;
+                    }
+                    ctx.emit_from(start, Kind::Operator);
+                } else {
+                    ctx.pos += 1;
+                }
+            }
+            b'|' => ctx.token(1, Kind::Operator),
+            b'^' | b'$' => ctx.token(1, Kind::Keyword),
+            b'.' => ctx.token(1, Kind::Builtin),
+            b'#' if extended => {
+                ctx.pos = ctx.line_end(start).min(end);
+                ctx.emit_from(start, Kind::Comment);
+            }
+            _ => ctx.bump_char(),
+        }
+    }
+    ctx.pos = end;
+}
+
+/// Group syntax after `(`: `?:`, `?=`, `?<name>`, `?P<name>`, `?#comment`
+/// and inline flags. Returns true when the `x` (extended) flag is turned on.
+fn regex_group(ctx: &mut Ctx, end: usize) -> bool {
+    let start = ctx.pos;
+    let next = ctx.peek_at(1);
+    match next {
+        b'#' => {
+            let close = ctx.src[start..end].iter().position(|&b| b == b')').map_or(end, |i| start + i);
+            ctx.pos = close;
+            ctx.emit_from(start, Kind::Comment);
+            false
+        }
+        b':' | b'=' | b'!' | b'>' | b'|' => {
+            ctx.token(2, Kind::Keyword);
+            false
+        }
+        b'<' if matches!(ctx.peek_at(2), b'=' | b'!') => {
+            ctx.token(3, Kind::Keyword);
+            false
+        }
+        b'<' | b'\'' | b'P' | b'&' => {
+            // Named groups and references: `(?<name>`, `(?'name'`, `(?P<name>`, `(?P=name)`, `(?&name)`.
+            let mut i = start + 2;
+            if next == b'P' {
+                if !matches!(ctx.at(i), b'<' | b'=' | b'>') {
+                    ctx.token(1, Kind::Keyword);
+                    return false;
+                }
+                i += 1;
+            }
+            ctx.pos = i.min(end);
+            ctx.emit_from(start, Kind::Keyword);
+            let name = ctx.pos;
+            while ctx.pos < end && is_ident(ctx.peek()) {
+                ctx.pos += 1;
+            }
+            ctx.emit_from(name, Kind::Variable);
+            if ctx.pos < end && matches!(ctx.peek(), b'>' | b'\'') {
+                ctx.token(1, Kind::Keyword);
+            }
+            false
+        }
+        _ => {
+            // Inline flags: `(?i)`, `(?x-s:`.
+            let mut i = start + 1;
+            while i < end && (ctx.src[i].is_ascii_alphabetic() || ctx.src[i] == b'-') {
+                i += 1;
+            }
+            if ctx.at(i) == b':' && i < end {
+                i += 1;
+            }
+            let on = &ctx.src[start + 1..i];
+            let extended = on.split(|&b| b == b'-').next().is_some_and(|f| f.contains(&b'x'));
+            ctx.pos = i;
+            ctx.emit_from(start, Kind::Keyword);
+            extended
+        }
+    }
+}
+
+/// An escape at the cursor: character classes such as `\d` are builtins,
+/// backreferences are variables and everything else is an escape.
+fn regex_escape(ctx: &mut Ctx, end: usize) {
+    let start = ctx.pos;
+    let c = ctx.peek_at(1);
+    let until = |ctx: &Ctx, close: u8| {
+        ctx.src[start..end].iter().position(|&b| b == close).map_or(start + 2, |i| start + i + 1)
+    };
+    let (len_end, kind) = match c {
+        b'd' | b'D' | b'w' | b'W' | b's' | b'S' | b'b' | b'B' | b'A' | b'z' | b'Z' | b'G' | b'h' | b'H' | b'v'
+        | b'V' | b'R' | b'X' | b'K' | b'N' => (start + 2, Kind::Builtin),
+        b'p' | b'P' if ctx.at(start + 2) == b'{' => (until(ctx, b'}'), Kind::Builtin),
+        b'p' | b'P' => (start + 3, Kind::Builtin),
+        b'1'..=b'9' => {
+            let mut e = start + 2;
+            while ctx.at(e).is_ascii_digit() {
+                e += 1;
+            }
+            (e, Kind::Variable)
+        }
+        b'k' | b'g' => match ctx.at(start + 2) {
+            b'<' => (until(ctx, b'>'), Kind::Variable),
+            b'{' => (until(ctx, b'}'), Kind::Variable),
+            b'\'' => {
+                let close =
+                    ctx.src[start + 3..end].iter().position(|&b| b == b'\'').map_or(start + 3, |i| start + 4 + i);
+                (close, Kind::Variable)
+            }
+            _ => (start + 2, Kind::Escape),
+        },
+        b'x' | b'u' if ctx.at(start + 2) == b'{' => (until(ctx, b'}'), Kind::Escape),
+        b'x' | b'u' => {
+            let max = if c == b'x' { 2 } else { 4 };
+            let mut e = start + 2;
+            while e < start + 2 + max && ctx.at(e).is_ascii_hexdigit() {
+                e += 1;
+            }
+            (e, Kind::Escape)
+        }
+        b'c' => (start + 3, Kind::Escape),
+        0 => (start + 1, Kind::Escape),
+        _ => {
+            ctx.pos = start + 1;
+            ctx.bump_char();
+            (ctx.pos, Kind::Escape)
+        }
+    };
+    ctx.pos = len_end.min(end).max(start + 1);
+    // Never stop inside a multi byte character.
+    while ctx.pos < end && (ctx.src[ctx.pos] & 0xC0) == 0x80 {
+        ctx.pos += 1;
+    }
+    ctx.emit_from(start, kind);
 }
