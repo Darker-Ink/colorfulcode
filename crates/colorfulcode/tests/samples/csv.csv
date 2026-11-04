@@ -4,3 +4,17 @@ id,name,email,age,city,joined,score,notes
 3,"Carol, Jr.",carol@example.com,41,"New
 York",2019-07-01,75.25,"multi, field"
 4,Dan,dan@example.com,,Tokyo,2022-01-30,60,plain
+5,Eve Adams,eve@example.com,52,Madrid,2018-05-21,99.9,"tab	inside"
+6,Frank Li,frank@example.com,23,Shanghai,2023-02-14,45.0,
+7,Grace Hopper,grace@example.com,85,Arlington,1952-01-01,100,"legend, ""amazing"""
+8,Heidi,heidi@example.com,31,Zurich,2021-09-09,71.3,
+9,Ivan Petrov,ivan@example.com,47,Moscow,2017-12-31,66.6,"Unicode: Иван"
+10,Judy,judy@example.com,29,Austin,2022-06-18,83.2,
+11,Ken Thompson,ken@example.com,80,Berkeley,1969-08-01,97.5,"wrote ""ed"""
+12,Linus,linus@example.com,54,Portland,1991-08-25,95.0,
+13,Mallory,mallory@example.com,,Unknown,,0,"suspicious"
+14,Niaj,niaj@example.com,38,Lagos,2020-03-03,77.7,
+15,Olivia,olivia@example.com,26,Sydney,2023-11-11,64.4,"emoji 🎨"
+16,Peggy,peggy@example.com,44,Dublin,2016-04-04,58.8,
+17,Quinn,quinn@example.com,33,Oslo,2021-07-07,81.1,
+18,Rupert,rupert@example.com,61,London,2015-10-10,69.9,"last ""row"""

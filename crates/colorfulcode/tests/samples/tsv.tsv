@@ -1,4 +1,20 @@
-id	name	language	stars
-1	colorfulcode	Rust	1200
-2	"tab	inside"	Go	340
-3	parser	TypeScript	87
+id	name	language	stars	license	updated
+1	colorfulcode	Rust	1200	MIT	2024-01-15
+2	"tab	inside"	Go	340	Apache-2.0	2023-12-01
+3	parser	TypeScript	87	MIT	2024-02-02
+4	tokenizer	Python	2300	BSD-3-Clause	2022-08-19
+5	renderer	C++	15	GPL-3.0	2021-05-05
+6	themes	CSS	640	MIT	2024-03-10
+7	"quoted ""name"""	Ruby	9	MIT	2020-01-01
+8	wasm-glue	Rust	410	MIT	2024-04-04
+9	cli	Go	1750	Apache-2.0	2023-07-27
+10	docs	Markdown	33	CC-BY-4.0	2024-01-30
+11	bench	Rust	120	MIT	2023-09-14
+12	fuzz	Rust	64	MIT	2023-10-31
+13	plugin-api	TypeScript	980	MIT	2024-02-29
+14	lsp	Rust	2200	MIT	2024-03-01
+15	vim	Vim Script	77	Vim	2019-06-06
+16	emacs	Emacs Lisp	58	GPL-3.0	2018-11-11
+17	vscode	TypeScript	5100	MIT	2024-03-15
+18	empty		Unknown	0
+19	last	Zig	3	MIT	2024-03-20
