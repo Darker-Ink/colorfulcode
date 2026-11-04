@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 keywords = ["syntax", "highlighting", "highlighter", "lexer", "wasm"]
 categories = ["text-processing", "parsing"]
+readme = "../../README.md"
 
 [features]
 default = ["all-languages"]

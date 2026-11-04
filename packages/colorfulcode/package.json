@@ -8,9 +8,18 @@
     "url": "git+https://github.com/Darker-Ink/colorfulcode.git",
     "directory": "packages/colorfulcode"
   },
-  "keywords": ["syntax", "highlighting", "highlighter", "react", "wasm", "code"],
+  "keywords": [
+    "syntax",
+    "highlighting",
+    "highlighter",
+    "react",
+    "wasm",
+    "code"
+  ],
   "type": "module",
-  "sideEffects": ["*.css"],
+  "sideEffects": [
+    "*.css"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -33,7 +42,10 @@
     "./styles.css": "./dist/styles.css",
     "./themes/*": "./dist/themes/*"
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs"
