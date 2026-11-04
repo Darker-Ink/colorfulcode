@@ -958,7 +958,7 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         // `Foo* f(`, `int[] f(`). Calls after `=`, `(`, `,` or an operator
         // never are, and skipping them avoids the lookahead for most calls.
         if i > 0
-            && !matches!(src[i - 1], b'\n' | b'*' | b'&' | b'>' | b']' | b'}' | b';')
+            && !matches!(src[i - 1], b'\n' | b'*' | b'&' | b'>' | b']' | b'{' | b'}' | b';')
             && !self.is_ident_byte(src[i - 1])
         {
             return false;
