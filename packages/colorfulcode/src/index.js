@@ -90,7 +90,7 @@ const LINE_NUMBERS = 4;
  *
  * With a theme (the default is "colorful") the HTML uses inline styles and
  * needs no CSS. Pass `theme: false` to get class names instead and style them
- * with `themeCss()` or `colorfulcode/themes/<name>.css`.
+ * with `themeCss()` or `colorfulcode/css/<name>.css`.
  */
 export function highlight(code, language, options = {}) {
   const w = instance();

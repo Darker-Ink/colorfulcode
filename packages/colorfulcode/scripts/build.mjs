@@ -58,7 +58,7 @@ console.log(`dist ready: full wasm ${kib(full)}, common wasm ${kib(common)}`);
 
 // Prebuilt theme stylesheets for the class based output.
 const { listThemes, themeCss } = await import(join(dist, "index.js"));
-mkdirSync(join(dist, "themes"));
+mkdirSync(join(dist, "css"));
 for (const { name } of listThemes()) {
-  writeFileSync(join(dist, "themes", `${name}.css`), themeCss(name));
+  writeFileSync(join(dist, "css", `${name}.css`), themeCss(name));
 }

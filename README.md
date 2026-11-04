@@ -79,7 +79,7 @@ const tokens = tokenize("const answer = 42;", "js");
 | `getLanguage(name)`, `listLanguages()` | Language info: `id`, `name`, `aliases`, `extensions`, `filenames`. |
 | `getTheme(name)`, `listThemes()` | Theme info with every color. |
 | `defineTheme(theme)` | Registers a [custom theme](#custom-themes) and returns its name. |
-| `themeCss(theme, selector?)` | CSS for class based output. Also shipped as `colorfulcode/themes/<name>.css`. |
+| `themeCss(theme, selector?)` | CSS for class based output. Also shipped as `colorfulcode/css/<name>.css`. |
 
 Unknown languages fall back to plain text.
 

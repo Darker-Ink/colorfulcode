@@ -40,7 +40,7 @@
       "default": "./dist/common-react.js"
     },
     "./styles.css": "./dist/styles.css",
-    "./themes/*": "./dist/themes/*"
+    "./css/*": "./dist/css/*"
   },
   "files": [
     "dist",
