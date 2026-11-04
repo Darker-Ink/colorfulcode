@@ -105,6 +105,11 @@ int32_t cc_language_from_path(const char* path);
  * Returns -1 if unknown. */
 int32_t cc_language_from_content(const char* code, size_t len);
 
+/* Guesses the language from the content alone, scoring the first few KB
+ * against every language. Opt-in: highlighting never calls it.
+ * Returns -1 when unsure or for invalid UTF-8. */
+int32_t cc_language_detect(const char* code, size_t len);
+
 /* Canonical id of a language, for example "rust". NULL if out of range. */
 const char* cc_language_id(int32_t language);
 
