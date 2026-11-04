@@ -139,11 +139,6 @@ fn trim_end(src: &[u8], start: usize, mut end: usize) -> usize {
     end
 }
 
-/// Column of `pos` within its line.
-fn column(ctx: &Ctx, pos: usize) -> usize {
-    pos - ctx.src[..pos].iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1)
-}
-
 /// Whether `s` is a number: decimal with `_` separators, fraction and
 /// exponent, or `0x`, `0o` and `0b` prefixed. A leading sign is allowed.
 fn is_number(s: &[u8]) -> bool {
@@ -270,20 +265,67 @@ pub static YAML: Definition = Definition::new("yaml", "YAML", Engine::Custom(yam
     .extensions(&["yaml", "yml"])
     .filenames(&[".clang-format", ".clang-tidy", ".gemrc"]);
 
+/// The columns of the open block nodes (mapping keys and `- ` entries),
+/// innermost last, and the start of the current line.
+struct YamlIndents {
+    cols: [usize; 32],
+    len: usize,
+    line: usize,
+}
+
+impl YamlIndents {
+    /// Closes the nodes a line starting at `col` ends and returns the column
+    /// of the node that contains it, or -1 at the top level.
+    fn parent(&mut self, col: usize) -> isize {
+        while self.len > 0 && self.cols[self.len - 1] >= col {
+            self.len -= 1;
+        }
+        if self.len == 0 {
+            -1
+        } else {
+            self.cols[self.len - 1] as isize
+        }
+    }
+
+    fn push(&mut self, col: usize) {
+        if self.len == self.cols.len() {
+            self.len -= 1;
+        }
+        self.cols[self.len] = col;
+        self.len += 1;
+    }
+}
+
 fn yaml(ctx: &mut Ctx) {
+    let mut indents = YamlIndents { cols: [0; 32], len: 0, line: 0 };
+    // Lines indented past this column continue a multi-line plain scalar.
+    let mut plain: Option<usize> = None;
     while !ctx.done() {
         let start = ctx.pos;
         let at = ctx.skip_spaces_from(start);
         ctx.pos = at;
-        if at == start && yaml_document_marker(ctx, at) {
+        indents.line = start;
+        if matches!(ctx.peek(), b'\n' | b'\r' | b'#') {
+            // Blank and comment lines leave the indentation alone; a comment ends a plain scalar.
+            plain = plain.filter(|_| ctx.peek() != b'#');
+        } else if at == start && yaml_document_marker(ctx, at) {
             ctx.token(3, Kind::Punctuation);
             ctx.skip_spaces();
-            yaml_block(ctx, -1);
+            indents.len = 0;
+            plain = yaml_block(ctx, &mut indents, -1);
         } else if at == start && ctx.peek() == b'%' {
             ctx.skip_line();
             ctx.emit_from(at, Kind::Meta);
+            plain = None;
+        } else if plain.is_some_and(|col| at - start > col) {
+            // `key: a long\n  text with a: colon` is still the value.
+            let end = yaml_plain_end(ctx, at, false);
+            ctx.emit(at, end, Kind::String);
+            ctx.pos = end;
+            plain = plain.filter(|_| matches!(ctx.next_non_space(end), 0 | b'\n' | b'\r'));
         } else {
-            yaml_block(ctx, column(ctx, at) as isize - 1);
+            let parent = indents.parent(at - start);
+            plain = yaml_block(ctx, &mut indents, parent);
         }
         yaml_rest(ctx);
         if ctx.peek() == b'\n' {
@@ -309,29 +351,35 @@ fn yaml_rest(ctx: &mut Ctx) {
 
 /// Block indicators (`- `, `? `, `: `) followed by a node. `parent` is the
 /// column of the enclosing node, which a block scalar must be indented past.
-fn yaml_block(ctx: &mut Ctx, mut parent: isize) {
-    while matches!(ctx.peek(), b'-' | b'?' | b':') && is_blank(ctx.peek_at(1)) {
-        let b = ctx.peek();
-        parent = column(ctx, ctx.pos) as isize;
+/// Returns that column when the line ends in a plain scalar that the next
+/// lines may continue.
+fn yaml_block(ctx: &mut Ctx, indents: &mut YamlIndents, mut parent: isize) -> Option<usize> {
+    let mut value = false;
+    while !value && matches!(ctx.peek(), b'-' | b'?' | b':') && is_blank(ctx.peek_at(1)) {
+        let col = ctx.pos - indents.line;
+        value = ctx.peek() == b':';
+        if !value {
+            indents.push(col);
+        }
+        parent = col as isize;
         ctx.token(1, Kind::Punctuation);
         ctx.skip_spaces();
-        if b == b':' {
-            yaml_value(ctx, parent);
-            return;
+    }
+    if !value {
+        yaml_properties(ctx);
+        let start = ctx.pos;
+        if let Some((key_end, colon)) = yaml_key(ctx, start, false) {
+            let col = start - indents.line;
+            indents.push(col);
+            parent = col as isize;
+            ctx.emit(start, key_end, Kind::Property);
+            ctx.pos = colon;
+            ctx.token(1, Kind::Punctuation);
+            ctx.skip_spaces();
         }
     }
-    yaml_properties(ctx);
-    let start = ctx.pos;
-    if let Some((key_end, colon)) = yaml_key(ctx, start, false) {
-        let key_col = column(ctx, start) as isize;
-        ctx.emit(start, key_end, Kind::Property);
-        ctx.pos = colon;
-        ctx.token(1, Kind::Punctuation);
-        ctx.skip_spaces();
-        yaml_value(ctx, key_col);
-    } else {
-        yaml_value(ctx, parent);
-    }
+    let plain = yaml_value(ctx, parent);
+    (plain && parent >= 0 && matches!(ctx.next_non_space(ctx.pos), 0 | b'\n' | b'\r')).then_some(parent as usize)
 }
 
 /// If a mapping key starts at `from`, returns the end of the key and the
@@ -411,7 +459,8 @@ fn yaml_name(ctx: &mut Ctx, kind: Kind) {
     ctx.emit(start, end, kind);
 }
 
-fn yaml_value(ctx: &mut Ctx, parent: isize) {
+/// A node after its key or indicator. Returns true for a plain scalar.
+fn yaml_value(ctx: &mut Ctx, parent: isize) -> bool {
     yaml_properties(ctx);
     match ctx.peek() {
         b'|' | b'>' if yaml_block_scalar(ctx, parent) => {}
@@ -425,8 +474,10 @@ fn yaml_value(ctx: &mut Ctx, parent: isize) {
             let end = yaml_plain_end(ctx, start, false);
             ctx.emit(start, end, yaml_scalar_kind(&ctx.src[start..end]));
             ctx.pos = end;
+            return true;
         }
     }
+    false
 }
 
 /// End of a plain scalar starting at `from` (trailing spaces excluded).
@@ -956,11 +1007,14 @@ fn columns(ctx: &mut Ctx, mut sep: u8) {
 // SQL
 
 /// Dollar quoted bodies (`$$ ... $$`, `$fn$ ... $fn$`), parameters (`$1`,
-/// `:name`), `::` casts and bracketed identifiers (`[Order Details]`).
+/// `:name`), `::` casts, bracketed identifiers (`[Order Details]`), plain
+/// strings and `FROM`.
 fn sql_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     match ctx.peek() {
+        b'\'' => sql_string(lx),
+        b'f' | b'F' => sql_from(lx),
         b'$' => {
             let next = ctx.peek_at(1);
             if next.is_ascii_digit() {
@@ -991,7 +1045,7 @@ fn sql_hook(lx: &mut Lexer) -> bool {
             if start > 0 && (is_ident(ctx.src[start - 1]) || matches!(ctx.src[start - 1], b')' | b']')) {
                 return false;
             }
-            let line_end = ctx.line_end(start);
+            let line_end = ctx.line_end_within(start, 256);
             let Some(close) = ctx.src[start..line_end].iter().position(|&b| b == b']') else {
                 return false;
             };
@@ -1005,8 +1059,13 @@ fn sql_hook(lx: &mut Lexer) -> bool {
             true
         }
         b':' if ctx.peek_at(1) == b':' => {
+            // `x::name`: the cast target is a type.
             ctx.token(2, Kind::Operator);
+            let typed = is_ident_start(ctx.peek());
             lx.mark_operator();
+            if typed {
+                lx.set_pending(Some(Kind::Type));
+            }
             true
         }
         b':' if is_ident_start(ctx.peek_at(1)) && (start == 0 || !is_ident(ctx.src[start - 1])) => {
@@ -1020,6 +1079,100 @@ fn sql_hook(lx: &mut Lexer) -> bool {
     }
 }
 
+/// A standard string, where `''` is a quote. Backslash escapes count too, as
+/// in MySQL, except a backslash right before the closing quote (`'C:\'`).
+fn sql_string(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let src = ctx.src;
+    let start = ctx.pos;
+    let mut seg = start;
+    let mut i = start + 1;
+    loop {
+        match src[i..].iter().position(|&b| b == b'\'' || b == b'\\') {
+            Some(p) => i += p,
+            None => {
+                i = src.len();
+                break;
+            }
+        }
+        if src[i] == b'\'' {
+            if ctx.at(i + 1) == b'\'' {
+                i += 2;
+                continue;
+            }
+            i += 1;
+            break;
+        }
+        if ctx.at(i + 1) == b'\'' && matches!(ctx.at(i + 2), 0 | b' ' | b'\t' | b'\r' | b'\n' | b',' | b')' | b';') {
+            i += 1;
+            continue;
+        }
+        ctx.emit(seg, i, Kind::String);
+        ctx.pos = i;
+        escape_len(ctx);
+        ctx.emit_from(i, Kind::Escape);
+        seg = ctx.pos;
+        i = ctx.pos;
+    }
+    ctx.pos = i;
+    ctx.emit(seg, i, Kind::String);
+    lx.mark_value();
+    true
+}
+
+/// Functions whose arguments use `FROM` without naming a table.
+const SQL_FROM_FUNCTIONS: &[&[u8]] = &[b"extract", b"trim", b"substring", b"overlay"];
+
+/// `FROM` names a table unless it is part of `EXTRACT(x FROM y)` and similar
+/// calls or `IS DISTINCT FROM`. A table function (`FROM unnest(...)`) stays a call.
+fn sql_from(lx: &mut Lexer) -> bool {
+    let ctx = &*lx.ctx;
+    let start = ctx.pos;
+    let end = start + 4;
+    if !ctx.starts_with_ignore_case(b"from") || is_ident(ctx.at(end)) || (start > 0 && ctx.src[start - 1] == b'.') {
+        return false;
+    }
+    let word_before = |pos: usize| {
+        let mut e = pos;
+        while e > 0 && ctx.src[e - 1].is_ascii_whitespace() {
+            e -= 1;
+        }
+        let mut s = e;
+        while s > 0 && is_ident(ctx.src[s - 1]) {
+            s -= 1;
+        }
+        &ctx.src[s..e]
+    };
+    let mut table = !word_before(start).eq_ignore_ascii_case(b"distinct");
+    // Look back for an unclosed `(` in the same statement.
+    let mut depth = 0u32;
+    let mut i = start;
+    while table && i > start.saturating_sub(256) {
+        i -= 1;
+        match ctx.src[i] {
+            b')' => depth += 1,
+            b'(' if depth == 0 => {
+                let name = word_before(i);
+                table = !SQL_FROM_FUNCTIONS.iter().any(|f| name.eq_ignore_ascii_case(f));
+                break;
+            }
+            b'(' => depth -= 1,
+            b';' => break,
+            _ => {}
+        }
+    }
+    let mut next = end;
+    while ctx.at(next).is_ascii_whitespace() {
+        next += 1;
+    }
+    let pending = table && is_ident_start(ctx.at(next)) && ctx.at(lx.scan_ident(next)) != b'(';
+    lx.ctx.pos = end;
+    lx.ctx.emit(start, end, Kind::Keyword);
+    lx.mark_operator();
+    lx.set_pending(pending.then_some(Kind::Type));
+    true
+}
+
 static SQL_SPEC: Spec = Spec {
     line_comments: &["--"],
     block_comments: &[("/*", "*/")],
@@ -1028,15 +1181,16 @@ static SQL_SPEC: Spec = Spec {
         Str::quoted("\"").raw().doubled().kind(Kind::Property),
         Str::quoted("`").raw().doubled().kind(Kind::Property),
     ],
+    // Plain `'...'` strings go through `sql_string`; `E'...'` has every backslash escape.
     string_prefixes: &[
         Prefix::plain(b'E'),
         Prefix::plain(b'e'),
         Prefix::plain(b'N'),
         Prefix::plain(b'n'),
-        Prefix::plain(b'X'),
-        Prefix::plain(b'x'),
-        Prefix::plain(b'B'),
-        Prefix::plain(b'b'),
+        Prefix::raw(b'X'),
+        Prefix::raw(b'x'),
+        Prefix::raw(b'B'),
+        Prefix::raw(b'b'),
     ],
     keywords: &[
         "add", "after", "all", "alter", "analyze", "and", "any", "as", "asc", "begin", "between", "by", "call",
@@ -1065,14 +1219,15 @@ static SQL_SPEC: Spec = Spec {
         "string_agg", "array_agg", "substring", "sum", "trim", "upper",
     ],
     constants: &["null", "true", "false", "unknown"],
-    // Table names follow these words.
-    type_keywords: &["table", "into", "from", "join", "update", "exists"],
+    // Table names follow these words (and `FROM`, see `sql_from`).
+    type_keywords: &["table", "into", "join", "update", "exists"],
     sigils: &[(b'@', Kind::Variable)],
     operators: "+-*/%=&|^!<>~?:",
     case_insensitive: true,
-    features: CALLS | MEMBERS,
+    // Tight calls keep `INSERT INTO t (a, b)` and `VALUES (1)` from looking like calls.
+    features: TIGHT_CALLS | MEMBERS,
     hook: Some(sql_hook),
-    hook_chars: "$[:",
+    hook_chars: "$[:'fF",
     ..Spec::DEFAULT
 };
 
@@ -1142,13 +1297,70 @@ const DIFF_META: &[&[u8]] = &[
     b"rename to", b"copy from", b"copy to", b"Binary files", b"Only in",
 ];
 
+/// The old and new line counts of a hunk header: `@@ -1,3 +1,4 @@` gives
+/// `(3, 4)`, and a missing count is 1.
+fn diff_hunk_counts(line: &[u8]) -> Option<(usize, usize)> {
+    fn range(s: &[u8], sign: u8) -> Option<(usize, &[u8])> {
+        let s = s.strip_prefix(&[sign])?;
+        let digits = s.iter().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        let s = &s[digits..];
+        let Some(s) = s.strip_prefix(b",") else {
+            return Some((1, s));
+        };
+        let digits = s.iter().take_while(|b| b.is_ascii_digit()).count();
+        let count = std::str::from_utf8(&s[..digits]).ok()?.parse().ok()?;
+        Some((count, &s[digits..]))
+    }
+    let (old, rest) = range(line.strip_prefix(b"@@ ")?, b'-')?;
+    let (new, rest) = range(rest.strip_prefix(b" ")?, b'+')?;
+    rest.starts_with(b" @@").then_some((old, new))
+}
+
 fn diff(ctx: &mut Ctx) {
+    // Lines still to come in the current hunk, on the old and the new side.
+    // Inside a hunk `--- x` and `+++ y` are content, not file headers.
+    let (mut old, mut new) = (0usize, 0usize);
     while !ctx.done() {
         let start = ctx.pos;
         let end = ctx.line_end(start);
         let line = &ctx.src[start..end];
+        let first = line.first().copied().unwrap_or(0);
+        if old > 0 || new > 0 {
+            let kind = match first {
+                b'+' => {
+                    new = new.saturating_sub(1);
+                    Some(Kind::Inserted)
+                }
+                b'-' => {
+                    old = old.saturating_sub(1);
+                    Some(Kind::Deleted)
+                }
+                b' ' | b'\r' | 0 => {
+                    old = old.saturating_sub(1);
+                    new = new.saturating_sub(1);
+                    Some(Kind::Text)
+                }
+                b'\\' => Some(Kind::Comment),
+                // The counts were wrong: back to headers.
+                _ => {
+                    (old, new) = (0, 0);
+                    None
+                }
+            };
+            if let Some(kind) = kind {
+                ctx.emit(start, end, kind);
+                ctx.pos = end;
+                if ctx.peek() == b'\n' {
+                    ctx.pos += 1;
+                }
+                continue;
+            }
+        }
         let next = if end < ctx.len() { &ctx.src[end + 1..ctx.line_end(end + 1)] } else { &[][..] };
-        let kind = match line.first().copied().unwrap_or(0) {
+        let kind = match first {
             // File headers come in pairs: `--- a/file` then `+++ b/file`.
             b'-' if line.starts_with(b"--- ") && next.starts_with(b"+++ ") => {
                 ctx.emit(start, end, Kind::Heading);
@@ -1165,8 +1377,9 @@ fn diff(ctx: &mut Ctx) {
             b'!' => Kind::Constant,
             b'@' if line.starts_with(b"@@") => {
                 // `@@ -1,3 +1,4 @@ fn context`: the trailing context stays text.
-                let close = ctx.find(start + 2, b"@@").filter(|&p| p < end).map_or(end, |p| p + 2);
+                let close = ctx.find_in(start + 2, end, b"@@").map_or(end, |p| p + 2);
                 ctx.emit(start, close, Kind::Meta);
+                (old, new) = diff_hunk_counts(line).unwrap_or((0, 0));
                 ctx.pos = end;
                 if ctx.peek() == b'\n' {
                     ctx.pos += 1;
@@ -1432,7 +1645,7 @@ fn http_message(ctx: &mut Ctx, line_end: usize) {
         };
         ctx.pos = target;
         let mut target_end = trim_end(ctx.src, target, line_end);
-        if let Some(v) = ctx.find(target, b" HTTP/").filter(|&v| v < line_end) {
+        if let Some(v) = ctx.find_in(target, line_end, b" HTTP/") {
             target_end = v;
         }
         http_text(ctx, target_end, Kind::String);
@@ -1516,7 +1729,7 @@ fn http_text(ctx: &mut Ctx, end: usize, kind: Kind) {
     let mut seg = ctx.pos;
     while ctx.pos < end {
         if ctx.starts_with(b"{{") {
-            if let Some(close) = ctx.find(ctx.pos + 2, b"}}").filter(|&c| c < end) {
+            if let Some(close) = ctx.find_in(ctx.pos + 2, end, b"}}") {
                 ctx.emit_from(seg, kind);
                 ctx.emit(ctx.pos, close + 2, Kind::Variable);
                 ctx.pos = close + 2;
@@ -1554,7 +1767,7 @@ fn cypher_hook(lx: &mut Lexer) -> bool {
     let next = lx.ctx.peek_at(1);
     if is_ident_start(next) || next == b'`' {
         let end = if next == b'`' {
-            let line_end = lx.ctx.line_end(start);
+            let line_end = lx.ctx.line_end_within(start, 1024).max(start + 2);
             lx.ctx.src[start + 2..line_end].iter().position(|&b| b == b'`').map_or(line_end, |i| start + 2 + i + 1)
         } else {
             lx.scan_ident(start + 1)
@@ -1612,7 +1825,7 @@ fn sparql_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     if ctx.peek() == b'<' {
-        let line_end = ctx.line_end(start);
+        let line_end = ctx.line_end_within(start, 2048);
         let mut i = start + 1;
         while i < line_end && !matches!(ctx.src[i], b'>' | b' ' | b'\t' | b'<' | b'"' | b'{' | b'}' | b'\r') {
             i += 1;
@@ -1711,7 +1924,7 @@ fn kdl(ctx: &mut Ctx) {
             b'/' if ctx.peek_at(1) == b'-' => kdl_slashdash(ctx, node),
             b'(' => {
                 // Type annotation: `(u8)`, `(date)"2024-01-01"`.
-                let line_end = ctx.line_end(start);
+                let line_end = ctx.line_end_within(start, 1024);
                 let close = ctx.src[start..line_end].iter().position(|&b| b == b')').map(|i| start + i);
                 ctx.emit(start, start + 1, Kind::Punctuation);
                 ctx.emit(start + 1, close.unwrap_or(line_end), Kind::Type);
@@ -2045,13 +2258,13 @@ pub static DOT: Definition =
 fn mermaid_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
-    let line_end = ctx.line_end(start);
+    let line_end = ctx.line_end_within(start, 4096);
     match ctx.peek() {
         b'%' => {
             if !ctx.starts_with(b"%%{") {
                 return false;
             }
-            let end = ctx.find(start, b"}%%").map_or(line_end, |p| p + 3);
+            let end = ctx.find_in(start, start + 65536, b"}%%").map_or(line_end, |p| p + 3);
             ctx.pos = end;
             ctx.emit(start, end, Kind::Meta);
         }
@@ -2149,7 +2362,7 @@ pub static MERMAID: Definition = Definition::new("mermaid", "Mermaid", Engine::G
 fn plantuml_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
-    let line_end = ctx.line_end(start);
+    let line_end = ctx.line_end_within(start, 4096);
     match ctx.peek() {
         b'#' => {
             let mut end = start + 1;
@@ -2164,10 +2377,13 @@ fn plantuml_hook(lx: &mut Lexer) -> bool {
         }
         b'<' if !ctx.starts_with(b"<<") => {
             // Standard library includes: `!include <C4/C4_Container>`.
-            let line_start = ctx.skip_spaces_from(start - column(ctx, start));
+            let mut before = start;
+            while before > 0 && matches!(ctx.src[before - 1], b' ' | b'\t') {
+                before -= 1;
+            }
             let close = ctx.src[start..line_end].iter().position(|&b| b == b'>');
             match close {
-                Some(c) if ctx.starts_with_at(line_start, b"!include") => {
+                Some(c) if ctx.src[..before].ends_with(b"!include") => {
                     ctx.pos = start + c + 1;
                     ctx.emit(start, ctx.pos, Kind::String);
                 }
@@ -2175,7 +2391,7 @@ fn plantuml_hook(lx: &mut Lexer) -> bool {
             }
         }
         b'<' => {
-            let Some(close) = ctx.find(start + 2, b">>").filter(|&c| c < line_end) else {
+            let Some(close) = ctx.find_in(start + 2, line_end, b">>") else {
                 return false;
             };
             ctx.pos = close + 2;
@@ -2269,7 +2485,7 @@ fn log(ctx: &mut Ctx) {
         match b {
             b'"' => quoted(ctx, Kind::String, ESC),
             b'\'' if start == 0 || !ctx.src[start - 1].is_ascii_alphanumeric() => {
-                let line_end = ctx.line_end(start);
+                let line_end = ctx.line_end_within(start, 1024);
                 let close = ctx.src[start + 1..line_end].iter().position(|&b| b == b'\'').map(|i| start + 1 + i);
                 match close {
                     Some(c) if !ctx.at(c + 1).is_ascii_alphanumeric() => {
@@ -2400,7 +2616,7 @@ fn regex_body(ctx: &mut Ctx, end: usize) {
                     class = None;
                 }
                 b'[' if ctx.peek_at(1) == b':' => {
-                    let close = ctx.find(start + 2, b":]").filter(|&c| c < end).map_or(start + 1, |c| c + 2);
+                    let close = ctx.find_in(start + 2, end, b":]").map_or(start + 1, |c| c + 2);
                     ctx.pos = close;
                     ctx.emit_from(start, Kind::Builtin);
                 }
