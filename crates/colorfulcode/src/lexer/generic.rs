@@ -271,6 +271,10 @@ const SET_START: u16 = 256;
 pub(crate) struct Compiled {
     words: Words,
     max_word: usize,
+    /// Bit `n` is set when some word has length `n`; cheap rejection before hashing.
+    word_lengths: u64,
+    /// Bytes that start some word (both cases for case insensitive specs).
+    word_starts: [bool; 256],
     sets: [u16; 256],
     sigils: [Option<Kind>; 128],
 }
@@ -279,9 +283,17 @@ impl Compiled {
     fn new(spec: &Spec) -> Compiled {
         let mut words = Words::default();
         let mut max_word = 0;
+        let mut word_lengths = 0u64;
+        let mut word_starts = [false; 256];
         let mut add = |list: &'static [&'static str], kind: Kind, next: Next| {
             for w in list {
                 max_word = max_word.max(w.len());
+                word_lengths |= 1u64.checked_shl(w.len() as u32).unwrap_or(0);
+                if let Some(&b) = w.as_bytes().first() {
+                    word_starts[b as usize] = true;
+                    word_starts[b.to_ascii_lowercase() as usize] = true;
+                    word_starts[b.to_ascii_uppercase() as usize] = true;
+                }
                 words.insert(w.as_bytes(), Word { kind, next });
             }
         };
@@ -337,7 +349,10 @@ impl Compiled {
             sets[b as usize] |= SET_SIGIL;
             sigils[b as usize & 127] = Some(kind);
         }
-        Compiled { words, max_word, sets, sigils }
+        if max_word >= 64 {
+            word_lengths = u64::MAX;
+        }
+        Compiled { words, max_word, word_lengths, word_starts, sets, sigils }
     }
 }
 
@@ -428,7 +443,12 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         while !self.ctx.done() {
             let b = self.ctx.peek();
             if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
-                self.ctx.pos += 1;
+                let src = self.ctx.src;
+                let mut pos = self.ctx.pos + 1;
+                while pos < src.len() && matches!(src[pos], b' ' | b'\t' | b'\n' | b'\r') {
+                    pos += 1;
+                }
+                self.ctx.pos = pos;
                 continue;
             }
             let set = self.set(b);
@@ -640,7 +660,10 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
     }
 
     fn lookup(&self, word: &[u8]) -> Option<Word> {
-        if word.len() > self.c.max_word {
+        if word.len() > self.c.max_word
+            || 1u64.checked_shl(word.len() as u32).is_some_and(|bit| self.c.word_lengths & bit == 0)
+            || !self.c.word_starts[word[0] as usize]
+        {
             return None;
         }
         if self.spec.case_insensitive {
