@@ -297,6 +297,116 @@ fn newer_ml_languages() {
 }
 
 #[test]
+fn lisp_binding_forms() {
+    let code = "(let loop ((x 1) (y (f 2))) (g x y))";
+    assert_tokens("scheme", code, &[("let", Keyword), ("loop", Function), ("x", Text), ("y", Text), ("f", Function)]);
+    assert_not("scheme", code, "x", Function);
+    assert_not("scheme", code, "y", Function);
+    assert_not("racket", "(let ([p (make-point 1 2)]) (λ (x) x))", "x", Function);
+    assert_not("scheme", "(do ((i 0 (+ i 1))) ((= i 3)) i)", "i", Function);
+    let code = "(flet ((double (x) (* 2 x))) (double 3))\n(defun withdraw (acct &key (force nil)) acct)";
+    assert_tokens(
+        "commonlisp",
+        code,
+        &[("double", Function), ("x", Text), ("withdraw", Function), ("acct", Text), ("&key", Keyword)],
+    );
+    assert_not("commonlisp", code, "force", Function);
+    assert_not("commonlisp", "(dolist (x (list 1 2)) (print x))", "x", Function);
+    assert_tokens("commonlisp", "(dolist (x (list 1 2)) x)", &[("list", Builtin)]);
+    assert_tokens(
+        "commonlisp",
+        "(defmethod area :around ((s circle)) s)",
+        &[("area", Function), (":around", Constant)],
+    );
+    assert_tokens("commonlisp", "(let ((x 1) ; one\n (y 2)) x)", &[("; one", Comment), ("y", Text)]);
+    assert_not("emacslisp", "(let* ((a 1)) (lambda (b) (+ a b)))", "a", Function);
+    // Unclosed forms stay linear and keep their text.
+    assert_tokens("scheme", "(let ((x (f", &[("x", Text), ("f", Function)]);
+    // Vectors never mark names as calls; `fn` names the function that follows.
+    assert_tokens("clojure", "(fn add [x] x) (let [y 1] y)", &[("add", Function), ("x", Text), ("y", Text)]);
+    assert_tokens("janet", "(fn add [x] x)", &[("add", Function)]);
+}
+
+#[test]
+fn unicode_symbols() {
+    let code = "def MyList.length : MyList α → Nat := ⟨a, b⟩\nexample : ∀ n, n ≤ m×n := h▸rfl";
+    assert_tokens(
+        "lean",
+        code,
+        &[
+            ("MyList.length", Function),
+            ("α", Text),
+            ("→", Operator),
+            ("⟨", Punctuation),
+            ("a", Text),
+            ("b", Text),
+            ("⟩", Punctuation),
+            ("∀", Keyword),
+            ("≤", Operator),
+            ("m", Text),
+            ("×", Operator),
+            ("h", Text),
+            ("▸", Operator),
+        ],
+    );
+    assert_tokens("lean", "theorem foo (x₁ : ℕ) := s!\"{x₁}\"", &[("foo", Function), ("x₁", Text), ("s!\"", String)]);
+    let code = "+-comm : ∀ m → m + n ≡ n\nproof = begin m ≡⟨ refl ⟩ n ∎";
+    assert_tokens(
+        "agda",
+        code,
+        &[("+-comm", Function), ("∀", Keyword), ("→", Keyword), ("≡", Operator), ("≡⟨", Operator), ("⟩", Operator)],
+    );
+    assert_tokens("koka", "val f := x → y", &[("→", Operator)]);
+}
+
+#[test]
+fn koka_names_and_types() {
+    let code = "fun sum-asked( n : int ) : ask int\n  sum-asked(n-1) + ask-number()";
+    assert_tokens(
+        "koka",
+        code,
+        &[("sum-asked", Function), ("int", Type), ("ask", Type), ("sum-asked", Function), ("n", Text), ("-", Operator)],
+    );
+    assert_tokens("koka", "fun area( s : shape ) : float64", &[("shape", Type)]);
+    assert_not("koka", "val x := 1\nfun f() : console ()", "console", Function);
+}
+
+#[test]
+fn reason_type_annotations() {
+    let code = "let describe = (status: status(user)) => 1;\nlet x: result(int, string) = f(1);";
+    assert_tokens("reason", code, &[("status", Type), ("result", Type), ("f", Function)]);
+    assert_tokens("reason", "let r = {a: compute(x)};", &[("compute", Function)]);
+    assert_tokens("reason", "let t = c ? a : g(x);", &[("g", Function)]);
+}
+
+#[test]
+fn haskell_quasi_quotes() {
+    let code = "q = [sql| SELECT * FROM t |]\npage = [hamlet|\n  <p>Hi\n|]\ndone = 1";
+    assert_tokens(
+        "haskell",
+        code,
+        &[
+            ("sql", Function),
+            (" SELECT * FROM t ", String),
+            ("|]", Punctuation),
+            ("hamlet", Function),
+            ("\n  <p>Hi\n", String),
+            ("done", Function),
+        ],
+    );
+    // List comprehensions are not quasi-quotes.
+    let code = "evens = [x|x<-xs, even x]";
+    assert_tokens("haskell", code, &[("x", Text), ("|", Operator), ("<-", Operator)]);
+    assert_not("haskell", code, "x", Function);
+}
+
+#[test]
+fn erlang_macro_and_record_definitions() {
+    let code = "-define(TIMEOUT, 5000).\n-record(point, {x = 0}).\nf() -> ?TIMEOUT.";
+    assert_tokens("erlang", code, &[("TIMEOUT", Meta), ("point", Type), ("x", Property), ("?TIMEOUT", Meta)]);
+}
+
+#[test]
 fn lookups() {
     let cases = [
         ("hs", "haskell"),

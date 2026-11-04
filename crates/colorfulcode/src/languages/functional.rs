@@ -26,15 +26,85 @@ fn after_char(ctx: &Ctx, i: usize) -> usize {
     j
 }
 
-/// The rest of the line from `from`, capped so unterminated constructs stay cheap.
-fn line_window<'s>(ctx: &Ctx<'s, '_>, from: usize) -> &'s [u8] {
-    let window = &ctx.src[from..(from + 256).min(ctx.len())];
-    let end = window.iter().position(|&b| b == b'\n').unwrap_or(window.len());
-    &window[..end]
+/// Position of `needle` before the end of the line, searching at most 256 bytes.
+fn find_on_line(ctx: &Ctx, from: usize, needle: &[u8]) -> Option<usize> {
+    ctx.find_in(from, ctx.line_end_within(from, 256), needle)
 }
 
 fn col0(ctx: &Ctx, pos: usize) -> bool {
     pos == 0 || ctx.src[pos - 1] == b'\n'
+}
+
+/// The Unicode bracket or math symbol at `i` (`⟨`, `→`, `≤`, `×`, `▸`) as its
+/// byte length and code point. Letters such as `α` or `ℕ` are not symbols.
+fn unicode_symbol(ctx: &Ctx, i: usize) -> Option<(usize, u32)> {
+    let b = ctx.at(i);
+    let cont = |k: usize| u32::from(ctx.at(i + k) & 0x3F);
+    let (len, cp) = match b {
+        0xC2 | 0xC3 => (2, (u32::from(b & 0x1F) << 6) | cont(1)),
+        0xE2 => (3, (u32::from(b & 0x0F) << 12) | (cont(1) << 6) | cont(2)),
+        _ => return None,
+    };
+    if i + len > ctx.len() || (1..len).any(|k| ctx.at(i + k) & 0xC0 != 0x80) {
+        return None;
+    }
+    let symbol = matches!(
+        cp,
+        0xAC | 0xB7 | 0xB9 | 0xD7 | 0xF7 | 0x2016 | 0x2039 | 0x203A | 0x207B
+            | 0x2190..=0x23FF
+            | 0x25A0..=0x25FF
+            | 0x27C0..=0x27FF
+            | 0x2900..=0x2AFF
+    );
+    symbol.then_some((len, cp))
+}
+
+/// Emits the Unicode symbol at the cursor, if there is one: brackets are
+/// punctuation, listed words such as `∀` keep their kind, the rest are operators.
+fn unicode_operator(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    let Some((len, cp)) = unicode_symbol(lx.ctx, start) else {
+        return false;
+    };
+    let end = start + len;
+    let bracket = matches!(cp, 0x27E6..=0x27EF | 0x2983..=0x2998 | 0x2039 | 0x203A | 0x2308..=0x230B);
+    let kind = match lx.word_kind(&lx.ctx.src[start..end]) {
+        Some(kind) => kind,
+        None if bracket => Kind::Punctuation,
+        None => Kind::Operator,
+    };
+    lx.ctx.pos = end;
+    lx.ctx.emit(start, end, kind);
+    // Closing brackets end a value: ⟩ ⟧ ⦄ › ⌋ ⌉.
+    let closing = match cp {
+        0x2983..=0x2998 | 0x203A => cp % 2 == 0,
+        0x2039 => false,
+        _ => cp % 2 == 1,
+    };
+    if bracket && closing {
+        lx.mark_value();
+    } else {
+        lx.mark_operator();
+    }
+    true
+}
+
+/// End of the identifier at `from`, stopping before a Unicode symbol.
+fn unicode_ident_end(lx: &Lexer, from: usize) -> usize {
+    let src = lx.ctx.src;
+    let mut i = from;
+    while i < src.len() && lx.is_ident_byte(src[i]) {
+        if src[i] >= 0xC2 && unicode_symbol(lx.ctx, i).is_some() {
+            return i;
+        }
+        i += 1;
+    }
+    // Suffixes such as the `!` in `get!`.
+    if i > from && matches!(lx.ctx.at(i), b'!' | b'?') {
+        lx.scan_ident(from)
+    } else {
+        i
+    }
 }
 
 /// Haskell style operator symbols.
@@ -248,7 +318,47 @@ fn fp_hook(lx: &mut Lexer, sig: &[u8]) -> bool {
     }
 }
 
+/// Quasi-quotes: `[sql| SELECT 1 |]`, `[QQ.str|...|]`. A list comprehension
+/// such as `[x|x<-xs]` closes with `]` on its own line, a quasi-quote with `|]`.
+fn quasi_quote(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    let mut bar = start + 1;
+    while is_ident(ctx.at(bar)) || ctx.at(bar) == b'\'' || (ctx.at(bar) == b'.' && is_ident_start(ctx.at(bar + 1))) {
+        bar += 1;
+    }
+    if bar == start + 1 || ctx.at(bar) != b'|' || !is_ident_start(ctx.at(start + 1)) {
+        return false;
+    }
+    let body = bar + 1;
+    let line_end = ctx.line_end_within(body, 256);
+    let close = match ctx.find_in(body, line_end, b"|]") {
+        Some(close) => close,
+        None => {
+            let rest = &ctx.src[body..line_end];
+            if line_end < ctx.len() && ctx.at(line_end) != b'\n'
+                || rest.contains(&b']')
+                || rest.windows(2).any(|w| w == b"<-")
+            {
+                return false;
+            }
+            ctx.find(body, b"|]").unwrap_or(ctx.len())
+        }
+    };
+    ctx.emit(start, start + 1, Kind::Punctuation);
+    ctx.emit(start + 1, bar, Kind::Function);
+    ctx.emit(bar, body, Kind::Punctuation);
+    ctx.emit(body, close, Kind::String);
+    ctx.pos = (close + 2).min(ctx.len());
+    ctx.emit(close, ctx.pos, Kind::Punctuation);
+    lx.mark_value();
+    true
+}
+
 fn haskell_hook(lx: &mut Lexer) -> bool {
+    if lx.ctx.peek() == b'[' {
+        return quasi_quote(lx);
+    }
     fp_hook(lx, b"::")
 }
 
@@ -283,7 +393,7 @@ static HASKELL_SPEC: Spec = Spec {
     operators: HS_OPERATORS,
     features: CAPITALIZED_TYPES,
     hook: Some(haskell_hook),
-    hook_chars: "-{'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_",
+    hook_chars: "-{'[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_",
     ..Spec::DEFAULT
 };
 
@@ -377,12 +487,29 @@ fn agda_hook(lx: &mut Lexer) -> bool {
     if b == b'{' {
         return pragma(lx);
     }
-    if !b.is_ascii_punctuation() || b == b'_' || b == b'\'' {
+    if b < 0x80 && (!b.is_ascii_punctuation() || b == b'_' || b == b'\'') {
         return colon_hook(lx);
     }
     let start = lx.ctx.pos;
     let end = lx.scan_ident(start);
-    if lx.ctx.src[start..end].iter().all(|b| b.is_ascii_punctuation()) {
+    if end == start {
+        return false;
+    }
+    // A name made of symbols only, Unicode ones included: `≡⟨`, `⟩`, `∎`, `<=`.
+    let mut i = start;
+    while i < end {
+        match lx.ctx.src[i] {
+            c if c.is_ascii_punctuation() => i += 1,
+            _ => match unicode_symbol(lx.ctx, i) {
+                Some((len, _)) => i += len,
+                None => break,
+            },
+        }
+    }
+    if i >= end {
+        if lx.word_kind(&lx.ctx.src[start..end]) == Some(Kind::Keyword) {
+            return false;
+        }
         lx.ctx.pos = end;
         lx.ctx.emit(start, end, Kind::Operator);
         lx.mark_operator();
@@ -414,7 +541,7 @@ static AGDA_SPEC: Spec = Spec {
     operators: HS_OPERATORS,
     features: CAPITALIZED_TYPES,
     hook: Some(agda_hook),
-    hook_chars: "-{'+*=<>!?/\\|^~&$%ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_",
+    hook_chars: "-{'+*=<>!?/\\|^~&$%ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_¬×→",
     ..Spec::DEFAULT
 };
 
@@ -447,19 +574,48 @@ pub static UNISON: Definition = Definition::new("unison", "Unison", Engine::Gene
 
 // Lean and Coq
 
-/// Character literals and `@[attribute]` lists.
+/// Names stop at Unicode brackets and operators (`⟨a, b⟩`), and a dotted
+/// name after `def` is defined as a whole (`def List.length`).
+fn lean_name(lx: &mut Lexer) -> bool {
+    let start = lx.ctx.pos;
+    let mut end = unicode_ident_end(lx, start);
+    if end == start {
+        return false;
+    }
+    let dotted = lx.ctx.at(end) == b'.' && is_ident_start(lx.ctx.at(end + 1));
+    if let (Some(kind), true) = (lx.pending(), dotted) {
+        while lx.ctx.at(end) == b'.' && is_ident_start(lx.ctx.at(end + 1)) {
+            end = unicode_ident_end(lx, end + 1);
+        }
+        lx.set_pending(None);
+        lx.mark_value();
+        lx.ctx.pos = end;
+        lx.ctx.emit(start, end, kind);
+        return true;
+    }
+    if lx.ctx.at(end) == b'"' {
+        // String prefixes: s!"...".
+        return false;
+    }
+    lx.ctx.pos = end;
+    let kind = lx.classify(start, end);
+    lx.ctx.emit(start, end, kind);
+    true
+}
+
+/// Character literals, `@[attribute]` lists, Unicode symbols and names.
 fn lean_hook(lx: &mut Lexer) -> bool {
     match lx.ctx.peek() {
         b'\'' => char_literal(lx),
         b'@' if lx.ctx.peek_at(1) == b'[' => {
             let ctx = &mut *lx.ctx;
             let start = ctx.pos;
-            let end = line_window(ctx, start).iter().position(|&b| b == b']').map_or(start + 2, |i| start + i + 1);
-            ctx.pos = end;
-            ctx.emit(start, end, Kind::Meta);
+            ctx.pos = find_on_line(ctx, start, b"]").map_or(start + 2, |i| i + 1);
+            ctx.emit_from(start, Kind::Meta);
             true
         }
-        _ => false,
+        b if b >= 0x80 && unicode_operator(lx) => true,
+        _ => lean_name(lx),
     }
 }
 
@@ -493,7 +649,7 @@ static LEAN_SPEC: Spec = Spec {
     ident_suffix: "!?",
     features: CAPITALIZED_TYPES | PREPROCESSOR,
     hook: Some(lean_hook),
-    hook_chars: "'@",
+    hook_chars: "'@ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_¬×→αω",
     ..Spec::DEFAULT
 };
 
@@ -554,8 +710,8 @@ fn binding(lx: &mut Lexer) -> bool {
         let mut e = lx.scan_ident(s);
         if lx.ctx.starts_with_at(s, b"``") {
             // F# ``name with spaces``.
-            if let Some(i) = line_window(lx.ctx, s + 2).windows(2).position(|w| w == b"``") {
-                e = s + 2 + i + 2;
+            if let Some(i) = find_on_line(lx.ctx, s + 2, b"``") {
+                e = i + 2;
                 lx.ctx.pos = e;
                 lx.ctx.emit(s, e, Kind::Function);
             }
@@ -615,9 +771,9 @@ fn ml_attribute(lx: &mut Lexer) -> bool {
             }
             true
         }
-        b'<' => match line_window(ctx, start + 2).windows(2).position(|w| w == b">]") {
+        b'<' => match find_on_line(ctx, start + 2, b">]") {
             Some(i) => {
-                ctx.pos = start + 2 + i + 2;
+                ctx.pos = i + 2;
                 ctx.emit_from(start, Kind::Meta);
                 true
             }
@@ -654,6 +810,55 @@ fn quoted_string(lx: &mut Lexer) -> bool {
     true
 }
 
+/// Reason type annotations apply types, not functions: `(s: status(user))`
+/// and `let x: result(int, string) = ...`.
+fn reason_annotation(lx: &mut Lexer) -> bool {
+    let ctx = &*lx.ctx;
+    let colon = ctx.pos;
+    if matches!(ctx.peek_at(1), b':' | b'=') {
+        return false;
+    }
+    let s = ctx.skip_spaces_from(colon + 1);
+    if !(ctx.at(s).is_ascii_lowercase() || ctx.at(s) == b'_') {
+        return false;
+    }
+    let e = lx.scan_ident(s);
+    if ctx.at(e) != b'(' || !annotation_context(ctx, colon) {
+        return false;
+    }
+    lx.ctx.token(1, Kind::Operator);
+    lx.ctx.pos = e;
+    lx.ctx.emit(s, e, Kind::Type);
+    lx.mark_value();
+    true
+}
+
+/// Whether the `:` at `colon` sits directly in a parameter list (the
+/// innermost open bracket on the line is `(`) or in a `let` binding, and not
+/// in a ternary.
+fn annotation_context(ctx: &Ctx, colon: usize) -> bool {
+    let low = colon.saturating_sub(256);
+    let mut depth = 0usize;
+    let mut i = colon;
+    while i > low {
+        i -= 1;
+        match ctx.src[i] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+            b'(' => return true,
+            b'[' | b'{' => return false,
+            b'?' if depth == 0 => return false,
+            b'\n' => {
+                i += 1;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let line = ctx.skip_spaces_from(i);
+    ctx.starts_with_at(line, b"let ")
+}
+
 static SML_CHAR: Str = Str::quoted("\"");
 
 fn ml_hook(lx: &mut Lexer) -> bool {
@@ -677,10 +882,10 @@ fn ml_hook(lx: &mut Lexer) -> bool {
         b'`' => {
             if next == b'`' {
                 // F# ``identifier with spaces``.
-                let Some(i) = line_window(lx.ctx, start + 2).windows(2).position(|w| w == b"``") else {
+                let Some(i) = find_on_line(lx.ctx, start + 2, b"``") else {
                     return false;
                 };
-                lx.ctx.pos = start + 2 + i + 2;
+                lx.ctx.pos = i + 2;
                 lx.ctx.emit_from(start, Kind::Text);
                 lx.mark_value();
                 return true;
@@ -731,6 +936,7 @@ fn ml_hook(lx: &mut Lexer) -> bool {
             true
         }
         b'l' | b'a' | b'm' | b'o' | b'd' => binding(lx),
+        b':' => reason_annotation(lx),
         _ => false,
     }
 }
@@ -860,9 +1066,9 @@ static REASON_SPEC: Spec = Spec {
     constants: &["true", "false"],
     type_keywords: &["type"],
     ident_chars: "'",
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS | ARROW_FUNCTIONS | JSX_ELEMENTS,
+    features: TIGHT_CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS | ARROW_FUNCTIONS | JSX_ELEMENTS,
     hook: Some(ml_hook),
-    hook_chars: "'`{[~?",
+    hook_chars: "'`{[~?:",
     ..Spec::DEFAULT
 };
 
@@ -1051,29 +1257,207 @@ fn lisp_word(lx: &mut Lexer) -> bool {
     true
 }
 
-/// `(fn name [args])` names a function, `(fn [args])` does not.
-fn lisp_fn(lx: &mut Lexer) -> bool {
+/// How a Lisp form binds the names that follow it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Form {
+    /// `(let [name] ((x 1) (y 2)) ...)`: a list of names or `(name value)` pairs.
+    Let,
+    /// `(flet ((name (args) body)) ...)`: local function definitions.
+    Flet,
+    /// `(dolist (x items) ...)`: a single `(name value)` pair.
+    Single,
+    /// `(lambda (x &optional (y 1)) ...)`: a parameter list.
+    Params,
+    /// `(defun name (args) ...)`: a function name, then its parameters.
+    Define,
+}
+
+/// The binding forms of each dialect.
+type Forms = fn(&[u8]) -> Option<Form>;
+
+fn scheme_forms(word: &[u8]) -> Option<Form> {
+    match word {
+        b"let" | b"let*" | b"letrec" | b"letrec*" | b"let-syntax" | b"letrec-syntax" | b"parameterize"
+        | b"fluid-let" | b"do" => Some(Form::Let),
+        b"lambda" | b"\xCE\xBB" | b"define-values" => Some(Form::Params),
+        _ => None,
+    }
+}
+
+fn racket_forms(word: &[u8]) -> Option<Form> {
+    match word {
+        b"let" | b"let*" | b"letrec" | b"parameterize" | b"do" | b"for" | b"for*" | b"for/list" | b"for*/list"
+        | b"for/vector" | b"for/hash" | b"for/sum" | b"for/fold" => Some(Form::Let),
+        b"lambda" | b"\xCE\xBB" | b"define-values" => Some(Form::Params),
+        _ => None,
+    }
+}
+
+fn commonlisp_forms(word: &[u8]) -> Option<Form> {
+    match word {
+        b"let" | b"let*" | b"do" | b"do*" => Some(Form::Let),
+        b"flet" | b"labels" | b"macrolet" => Some(Form::Flet),
+        b"dolist" | b"dotimes" | b"with-open-file" => Some(Form::Single),
+        b"lambda" | b"multiple-value-bind" | b"destructuring-bind" | b"with-slots" => Some(Form::Params),
+        b"defun" | b"defmacro" | b"defgeneric" | b"defmethod" => Some(Form::Define),
+        _ => None,
+    }
+}
+
+fn emacslisp_forms(word: &[u8]) -> Option<Form> {
+    match word {
+        b"let" | b"let*" => Some(Form::Let),
+        b"cl-flet" | b"cl-labels" => Some(Form::Flet),
+        b"dolist" | b"dotimes" => Some(Form::Single),
+        b"lambda" => Some(Form::Params),
+        b"defun" | b"defmacro" | b"defsubst" | b"cl-defun" | b"cl-defmacro" => Some(Form::Define),
+        _ => None,
+    }
+}
+
+/// Skips whitespace and line comments inside a binding form.
+fn skip_blank(ctx: &mut Ctx) {
+    loop {
+        match ctx.peek() {
+            b' ' | b'\t' | b'\n' | b'\r' => ctx.pos += 1,
+            b';' => {
+                let start = ctx.pos;
+                ctx.skip_line();
+                ctx.emit_from(start, Kind::Comment);
+            }
+            _ => return,
+        }
+    }
+}
+
+/// A name at the cursor, as `kind` unless it is a keyword such as `&optional`.
+fn lisp_name(lx: &mut Lexer, kind: Kind) -> bool {
     let start = lx.ctx.pos;
-    let end = lx.scan_ident(start);
-    let word = &lx.ctx.src[start..end];
-    if word != b"fn" && word != b"lambda" && word != "λ".as_bytes() {
+    let b = lx.ctx.peek();
+    if !lx.is_ident_byte(b) || b.is_ascii_digit() || b == b'#' {
         return false;
     }
+    let end = lx.scan_ident(start);
+    let kind = match lx.word_kind(&lx.ctx.src[start..end]) {
+        Some(k @ (Kind::Keyword | Kind::Constant)) => k,
+        _ => kind,
+    };
     lx.ctx.pos = end;
-    lx.ctx.emit(start, end, Kind::Keyword);
-    let s = lx.ctx.skip_spaces_from(end);
-    if is_ident_start(lx.ctx.at(s)) {
-        let e = lx.scan_ident(s);
-        lx.ctx.pos = e;
-        lx.ctx.emit(s, e, Kind::Function);
+    lx.ctx.emit(start, end, kind);
+    lx.mark_value();
+    true
+}
+
+/// `(name value...)` at the cursor: the name is `kind`, an `(args)` list
+/// follows it when `params` is set, and the rest is ordinary code.
+fn lisp_pair(lx: &mut Lexer, kind: Kind, params: bool) -> bool {
+    let close = if lx.ctx.peek() == b'[' { b']' } else { b')' };
+    lx.ctx.token(1, Kind::Punctuation);
+    lx.mark_operator();
+    skip_blank(lx.ctx);
+    lisp_name(lx, kind);
+    if params {
+        skip_blank(lx.ctx);
+        lisp_list(lx, Form::Params);
+    }
+    lx.nested(close);
+    if lx.ctx.peek() != close {
+        return false;
+    }
+    lx.ctx.token(1, Kind::Punctuation);
+    lx.mark_value();
+    true
+}
+
+/// A list of bindings or parameters at the cursor. Returns false when it
+/// stopped early and left the rest to the generic rules.
+fn lisp_list(lx: &mut Lexer, form: Form) -> bool {
+    let open = lx.ctx.peek();
+    if open != b'(' && open != b'[' {
+        return false;
+    }
+    let close = if open == b'[' { b']' } else { b')' };
+    lx.ctx.token(1, Kind::Punctuation);
+    lx.mark_operator();
+    loop {
+        skip_blank(lx.ctx);
+        match lx.ctx.peek() {
+            b if b == close => {
+                lx.ctx.token(1, Kind::Punctuation);
+                lx.mark_value();
+                return true;
+            }
+            b'(' | b'[' => {
+                if !lisp_pair(lx, if form == Form::Flet { Kind::Function } else { Kind::Text }, form == Form::Flet) {
+                    return false;
+                }
+            }
+            _ if form != Form::Flet && lisp_name(lx, Kind::Text) => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Binding forms such as `(let ((x 1)) ...)`: the names they bind are not calls.
+fn lisp_form(lx: &mut Lexer, forms: Forms) -> bool {
+    let start = lx.ctx.pos;
+    if start == 0 || lx.ctx.src[start - 1] != b'(' {
+        return false;
+    }
+    let end = lx.scan_ident(start);
+    let word = &lx.ctx.src[start..end];
+    let Some(form) = forms(word) else {
+        // An ordinary call; classify it here rather than scanning it twice.
+        lx.ctx.pos = end;
+        let kind = lx.classify(start, end);
+        lx.ctx.emit(start, end, kind);
+        return true;
+    };
+    let kind = lx.word_kind(word).unwrap_or(Kind::Keyword);
+    lx.ctx.pos = end;
+    lx.ctx.emit(start, end, kind);
+    lx.mark_operator();
+    lx.set_pending(None);
+    skip_blank(lx.ctx);
+    match form {
+        Form::Let => {
+            // Named let: (let loop ((i 0)) ...).
+            if lisp_name(lx, Kind::Function) {
+                skip_blank(lx.ctx);
+            }
+            lisp_list(lx, Form::Let);
+        }
+        Form::Flet | Form::Params => {
+            lisp_list(lx, form);
+        }
+        Form::Single => {
+            if matches!(lx.ctx.peek(), b'(' | b'[') {
+                lisp_pair(lx, Kind::Text, false);
+            }
+        }
+        Form::Define => {
+            if !lisp_name(lx, Kind::Function) {
+                return true;
+            }
+            skip_blank(lx.ctx);
+            // Method qualifiers: (defmethod area :around (shape) ...).
+            while lx.ctx.peek() == b':' && lx.ctx.peek_at(1).is_ascii_alphabetic() {
+                let s = lx.ctx.pos;
+                let e = lx.scan_ident(s + 1);
+                lx.ctx.pos = e;
+                lx.ctx.emit(s, e, Kind::Constant);
+                skip_blank(lx.ctx);
+            }
+            lisp_list(lx, Form::Params);
+        }
     }
     true
 }
 
-fn lisp_hook(lx: &mut Lexer) -> bool {
+fn lisp_hook(lx: &mut Lexer, forms: Forms) -> bool {
     let start = lx.ctx.pos;
     match lx.ctx.peek() {
-        b'f' | b'l' | 0xCE => lisp_fn(lx),
+        b'a'..=b'z' | 0xCE => lisp_form(lx, forms),
         b'#' => lisp_hash(lx),
         b'\\' if start + 1 < lx.ctx.len() => {
             // Clojure character literal: \a, \newline.
@@ -1119,13 +1503,33 @@ fn lisp_hook(lx: &mut Lexer) -> bool {
     }
 }
 
+fn clojure_hook(lx: &mut Lexer) -> bool {
+    lisp_hook(lx, |_| None)
+}
+
+fn scheme_hook(lx: &mut Lexer) -> bool {
+    lisp_hook(lx, scheme_forms)
+}
+
+fn racket_hook(lx: &mut Lexer) -> bool {
+    lisp_hook(lx, racket_forms)
+}
+
+fn commonlisp_hook(lx: &mut Lexer) -> bool {
+    lisp_hook(lx, commonlisp_forms)
+}
+
+fn emacslisp_hook(lx: &mut Lexer) -> bool {
+    lisp_hook(lx, emacslisp_forms)
+}
+
 const LISP_OPERATORS: &str = "'`~,@^";
 
 static CLOJURE_SPEC: Spec = Spec {
     line_comments: &[";"],
     strings: &[Str::quoted("\"").multiline(), Str::new("#\"", "\"").multiline().kind(Kind::Regex)],
     keywords: &[
-        "def", "defonce", "fn", "fn*", "let", "letfn", "loop", "recur", "if", "if-not", "if-let", "if-some", "when",
+        "def", "defonce", "fn*", "let", "letfn", "loop", "recur", "if", "if-not", "if-let", "if-some", "when",
         "when-not", "when-let", "when-some", "when-first", "cond", "condp", "case", "do", "quote", "var", "throw",
         "try", "catch", "finally", "new", "set!", "and", "or", "not", "doseq", "dotimes", "for", "while", "binding",
         "->", "->>", "as->", "some->", "some->>", "cond->", "cond->>", "doto", "..", "delay", "lazy-seq", "reify",
@@ -1140,14 +1544,14 @@ static CLOJURE_SPEC: Spec = Spec {
         "zipmap", "partition", "re-find", "re-matches", "re-seq", "slurp", "spit", "nth", "last", "contains?", "subs",
     ],
     constants: &["true", "false", "nil"],
-    function_keywords: &["defn", "defn-", "defmacro", "defmulti", "defmethod"],
+    function_keywords: &["fn", "defn", "defn-", "defmacro", "defmulti", "defmethod"],
     type_keywords: &["defprotocol", "defrecord", "deftype", "definterface", "ns"],
     ident_chars: "-+*/<>=!?.%&$'#",
     ident_start: LISP_IDENT,
     sigils: &[(b':', Kind::Constant)],
     operators: "'`~@^",
     features: LISP_CALLS,
-    hook: Some(lisp_hook),
+    hook: Some(clojure_hook),
     hook_chars: "#\\^*-+0123456789",
     ..Spec::DEFAULT
 };
@@ -1184,8 +1588,8 @@ static SCHEME_SPEC: Spec = Spec {
     ident_start: LISP_IDENT,
     operators: "'`,@",
     features: LISP_CALLS,
-    hook: Some(lisp_hook),
-    hook_chars: "#-+0123456789",
+    hook: Some(scheme_hook),
+    hook_chars: "#-+0123456789dflpλ",
     ..Spec::DEFAULT
 };
 
@@ -1224,8 +1628,8 @@ static RACKET_SPEC: Spec = Spec {
     ident_start: LISP_IDENT,
     operators: "'`,@",
     features: LISP_CALLS,
-    hook: Some(lisp_hook),
-    hook_chars: "#-+0123456789",
+    hook: Some(racket_hook),
+    hook_chars: "#-+0123456789dflpλ",
     ..Spec::DEFAULT
 };
 
@@ -1262,8 +1666,8 @@ static COMMONLISP_SPEC: Spec = Spec {
     sigils: &[(b':', Kind::Constant)],
     operators: "'`,@",
     features: LISP_CALLS,
-    hook: Some(lisp_hook),
-    hook_chars: "#*-+0123456789",
+    hook: Some(commonlisp_hook),
+    hook_chars: "#*-+0123456789dflmw",
     ..Spec::DEFAULT
 };
 
@@ -1297,8 +1701,8 @@ static EMACSLISP_SPEC: Spec = Spec {
     sigils: &[(b':', Kind::Constant)],
     operators: "'`,@",
     features: LISP_CALLS,
-    hook: Some(lisp_hook),
-    hook_chars: "#*?-+0123456789",
+    hook: Some(emacslisp_hook),
+    hook_chars: "#*?-+0123456789cdl",
     ..Spec::DEFAULT
 };
 
@@ -1321,14 +1725,14 @@ static FENNEL_SPEC: Spec = Spec {
         "pcall", "unpack", "setmetatable", "string.format", "table.insert", "table.concat", "table.remove",
     ],
     constants: &["true", "false", "nil"],
-    function_keywords: &["macro"],
+    function_keywords: &["fn", "lambda", "λ", "macro"],
     ident_chars: "-+*/<>=!?.%&$:^~",
     ident_start: LISP_IDENT,
     sigils: &[(b':', Kind::Constant)],
     operators: LISP_OPERATORS,
     features: LISP_CALLS,
-    hook: Some(lisp_hook),
-    hook_chars: "#-+0123456789flλ",
+    hook: Some(clojure_hook),
+    hook_chars: "#-+0123456789",
     ..Spec::DEFAULT
 };
 
@@ -1354,14 +1758,14 @@ static JANET_SPEC: Spec = Spec {
         "string/format", "array/push",
     ],
     constants: &["true", "false", "nil"],
-    function_keywords: &["defn", "defn-", "defmacro", "defmacro-"],
+    function_keywords: &["fn", "defn", "defn-", "defmacro", "defmacro-"],
     ident_chars: "-+*/<>=!?.%&$:^~",
     ident_start: LISP_IDENT,
     sigils: &[(b':', Kind::Constant)],
     operators: "'~,;@|",
     features: LISP_CALLS,
-    hook: Some(lisp_hook),
-    hook_chars: "-+0123456789f",
+    hook: Some(clojure_hook),
+    hook_chars: "-+0123456789",
     ..Spec::DEFAULT
 };
 
@@ -1391,7 +1795,7 @@ static HY_SPEC: Spec = Spec {
     sigils: &[(b':', Kind::Constant)],
     operators: LISP_OPERATORS,
     features: LISP_CALLS,
-    hook: Some(lisp_hook),
+    hook: Some(clojure_hook),
     hook_chars: "#-+0123456789",
     ..Spec::DEFAULT
 };
@@ -1412,6 +1816,24 @@ fn erlang_hook(lx: &mut Lexer) -> bool {
             let end = lx.scan_ident(start + 1);
             lx.ctx.pos = end;
             lx.ctx.emit(start, end, Kind::Meta);
+            // The macro or record being defined: -define(NAME, ...), -record(point, {...}).
+            let kind = match &lx.ctx.src[start + 1..end] {
+                b"define" => Kind::Meta,
+                b"record" => Kind::Type,
+                _ => return true,
+            };
+            let ctx = &mut *lx.ctx;
+            if ctx.peek() != b'(' {
+                return true;
+            }
+            ctx.token(1, Kind::Punctuation);
+            let s = ctx.skip_spaces_from(ctx.pos);
+            if is_ident_start(ctx.at(s)) {
+                let e = lx.scan_ident(s);
+                lx.ctx.pos = e;
+                lx.ctx.emit(s, e, kind);
+            }
+            lx.mark_value();
             true
         }
         b'$' => {
@@ -1648,6 +2070,28 @@ static GRAIN_SPEC: Spec = Spec {
 
 pub static GRAIN: Definition = Definition::new("grain", "Grain", Engine::Generic(&GRAIN_SPEC)).extensions(&["gr"]);
 
+/// Type annotations (`s : shape`) and Unicode operators.
+fn koka_hook(lx: &mut Lexer) -> bool {
+    if lx.ctx.peek() != b':' {
+        return unicode_operator(lx);
+    }
+    if matches!(lx.ctx.peek_at(1), b':' | b'=') {
+        return false;
+    }
+    lx.ctx.token(1, Kind::Operator);
+    lx.mark_operator();
+    let s = lx.ctx.skip_spaces_from(lx.ctx.pos);
+    if lx.ctx.at(s).is_ascii_lowercase() {
+        let e = lx.scan_ident(s);
+        if matches!(lx.word_kind(&lx.ctx.src[s..e]), None | Some(Kind::Type)) {
+            lx.ctx.pos = e;
+            lx.ctx.emit(s, e, Kind::Type);
+            lx.mark_value();
+        }
+    }
+    true
+}
+
 static KOKA_SPEC: Spec = Spec {
     line_comments: &["//"],
     block_comments: &[("/*", "*/")],
@@ -1671,8 +2115,10 @@ static KOKA_SPEC: Spec = Spec {
     constants: &["True", "False"],
     function_keywords: &["fun", "ctl"],
     type_keywords: &["type", "struct", "effect", "alias"],
-    ident_chars: "-'",
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS,
+    ident_chars: "'",
+    features: TIGHT_CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS | KEBAB,
+    hook: Some(koka_hook),
+    hook_chars: ":¬×→",
     ..Spec::DEFAULT
 };
 
