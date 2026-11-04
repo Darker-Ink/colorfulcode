@@ -52,9 +52,33 @@ fn comparisons_are_not_jsx() {
 
 #[test]
 fn javascript_regex_and_division() {
-    assert_tokens("javascript", "const re = /a\\/b[/]c/gi;", &[("/a\\/b[/]c/gi", Regex)]);
+    assert_tokens(
+        "javascript",
+        "const re = /a\\/b[/]c/gi;",
+        &[
+            ("/a", Regex),
+            ("\\/", Escape),
+            ("b", Regex),
+            ("[", Punctuation),
+            ("/", Regex),
+            ("]", Punctuation),
+            ("gi", Keyword),
+        ],
+    );
     assert_tokens("javascript", "const half = total / 2 / count;", &[("/", Operator)]);
     assert_tokens("javascript", "return /x/.test(s)", &[("/x/", Regex), ("test", Function)]);
+    assert_tokens(
+        "javascript",
+        "/^(?:a|b){2,3}\\d+$/",
+        &[
+            ("^", Operator),
+            ("(?:", Punctuation),
+            ("|", Operator),
+            ("{2,3}", Operator),
+            ("\\d", Escape),
+            ("+$", Operator),
+        ],
+    );
 }
 
 #[test]
@@ -182,4 +206,85 @@ fn html_lines() {
         out,
         "<span class=\"cc-line\"><span class=\"cc-ln\">1</span>a</span>\n<span class=\"cc-line\"><span class=\"cc-ln\">2</span>b</span>\n"
     );
+}
+
+#[test]
+fn parameters() {
+    assert_tokens(
+        "typescript",
+        "function greet(name: string, times = 2, ...rest: number[]) {}",
+        &[("name", Parameter), ("times", Parameter), ("rest", Parameter)],
+    );
+    assert_tokens(
+        "tsx",
+        "const pick = ({ id, title: label }: Post, [first]) => id; const inc = x => x + 1;",
+        &[("id", Parameter), ("label", Parameter), ("first", Parameter), ("x", Parameter)],
+    );
+    assert_not("typescript", "const id = <T,>(value: T): T => value;", "T", Parameter);
+    assert_tokens(
+        "javascript",
+        "class A { render(props, ctx) { return f(a, b); } }",
+        &[("props", Parameter), ("ctx", Parameter)],
+    );
+    assert_not("javascript", "class A { render(props, ctx) { return f(a, b); } }", "a", Parameter);
+    assert_not("javascript", "if (ready) { call(x, y); }", "x", Parameter);
+    assert_tokens(
+        "python",
+        "def f(self, r: float, *args, k=1, **kw): return lambda x, y=2: x",
+        &[
+            ("self", Variable),
+            ("r", Parameter),
+            ("args", Parameter),
+            ("k", Parameter),
+            ("kw", Parameter),
+            ("x", Parameter),
+            ("y", Parameter),
+        ],
+    );
+    assert_tokens(
+        "rust",
+        "fn load<T: Read>(mut reader: T, path: &str) {}",
+        &[("reader", Parameter), ("path", Parameter)],
+    );
+    assert_tokens("c", "int main(int argc, char **argv) { return 0; }", &[("argc", Parameter), ("argv", Parameter)]);
+    assert_tokens(
+        "go",
+        "func (s *Server) Handle(w http.ResponseWriter, a, b int) error {\n\tif valid(x) {}\n}",
+        &[("s", Parameter), ("w", Parameter), ("a", Parameter), ("b", Parameter)],
+    );
+    assert_not("go", "func f() {\n\tif valid(x) {}\n}", "x", Parameter);
+    assert_not("clojure", "(defn describe [x] (str x 1))", "str", Parameter);
+}
+
+#[test]
+fn comment_details() {
+    assert_tokens(
+        "javascript",
+        "/**\n * Sum. TODO: overflow\n * @param {number} a First.\n * @returns {number}\n */",
+        &[("TODO", Meta), ("@param", Meta), ("{number}", Type), ("a", Parameter), ("@returns", Meta)],
+    );
+    assert_tokens("rust", "// FIXME: later\nlet x = 1; // NOTE this", &[("FIXME", Meta), ("NOTE", Meta)]);
+    assert_not("rust", "// TODOS and NOTED are words", "TODOS", Meta);
+    assert_not("javascript", "// email@example.com is not a doc tag", "@example", Meta);
+    assert_tokens("csharp", "/// <summary>Hi</summary>\nclass A {}", &[("<summary>", Tag), ("</summary>", Tag)]);
+}
+
+#[test]
+fn format_placeholders() {
+    assert_tokens(
+        "c",
+        r#"printf("%d items, %-8.2f %%\n", n, x);"#,
+        &[("%d", Escape), ("%-8.2f", Escape), ("%%\\n", Escape)],
+    );
+    assert_tokens(
+        "rust",
+        r#"println!("{} {name:?} {0:>8} {{literal}}", a);"#,
+        &[("{}", Escape), ("{name:?}", Escape), ("{0:>8}", Escape), ("{{", Escape)],
+    );
+    assert_tokens("python", r#"s = "%(name)s is {0}" % d"#, &[("%(name)s", Escape), ("{0}", Escape)]);
+    assert_tokens("go", r#"fmt.Errorf("get %d: %w", id, err)"#, &[("%d", Escape), ("%w", Escape)]);
+    // JSON inside a string is not a placeholder.
+    assert_not("rust", r#"let j = "{ \"a\": 1 }";"#, "{ \\\"a\\\": 1 }", Escape);
+    // Languages without printf formatting leave `%` alone.
+    assert_tokens("javascript", r#"const s = "100%d";"#, &[(r#""100%d""#, String)]);
 }

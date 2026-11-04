@@ -785,7 +785,7 @@ static PYTHON_SPEC: Spec = Spec {
     constants: PY_CONSTANTS,
     function_keywords: &["def"],
     type_keywords: &["class"],
-    features: PY_FEATURES,
+    features: PY_FEATURES | PRINTF_FORMAT | BRACE_FORMAT | LAMBDA_PARAMS,
     hook: Some(python_hook),
     hook_chars: "fFtTrR",
     ..Spec::DEFAULT
@@ -930,7 +930,7 @@ static RUBY_SPEC: Spec = Spec {
     type_keywords: &["class", "module"],
     ident_suffix: "?!",
     sigils: RUBY_SIGILS,
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PRINTF_FORMAT,
     hook: Some(ruby_hook),
     hook_chars: ":%<=_@./",
     ..Spec::DEFAULT
@@ -1175,7 +1175,7 @@ static PERL_SPEC: Spec = Spec {
     constants: &["undef", "__FILE__", "__LINE__", "__PACKAGE__", "__SUB__"],
     function_keywords: &["sub"],
     type_keywords: &["package"],
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PRINTF_FORMAT,
     hook: Some(perl_hook),
     hook_chars: "$@%&\"/<=_{mqsty",
     ..Spec::DEFAULT
@@ -1504,7 +1504,7 @@ static LUA_SPEC: Spec = Spec {
     variables: &["self"],
     function_keywords: &["function"],
     operators: "+-*/%=&|^<>~#",
-    features: CALLS | UPPER_CONSTANTS | MEMBERS,
+    features: CALLS | UPPER_CONSTANTS | MEMBERS | PRINTF_FORMAT,
     hook: Some(lua_hook),
     hook_chars: "-[.:",
     ..Spec::DEFAULT
@@ -1627,7 +1627,7 @@ static R_SPEC: Spec = Spec {
     ],
     constants: &["TRUE", "FALSE", "NULL", "NA", "NaN", "Inf", "NA_integer_", "NA_real_", "NA_character_", "T", "F"],
     ident_chars: ".",
-    features: CALLS | UPPER_CONSTANTS,
+    features: CALLS | UPPER_CONSTANTS | PRINTF_FORMAT,
     hook: Some(r_hook),
     hook_chars: "$@%\\<=",
     ..Spec::DEFAULT
@@ -1716,7 +1716,7 @@ static JULIA_SPEC: Spec = Spec {
     function_keywords: &["function", "macro"],
     type_keywords: &["struct", "type", "module"],
     ident_suffix: "!",
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS | PARAMS_NAME_FIRST,
     hook: Some(julia_hook),
     hook_chars: "'r",
     ..Spec::DEFAULT

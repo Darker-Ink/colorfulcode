@@ -391,7 +391,7 @@ static HASKELL_SPEC: Spec = Spec {
     constants: &["True", "False"],
     ident_chars: "'",
     operators: HS_OPERATORS,
-    features: CAPITALIZED_TYPES,
+    features: CAPITALIZED_TYPES | PRINTF_FORMAT,
     hook: Some(haskell_hook),
     hook_chars: "-{'[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_",
     ..Spec::DEFAULT
@@ -968,7 +968,7 @@ static OCAML_SPEC: Spec = Spec {
     type_keywords: &["type"],
     ident_chars: "'",
     operators: "+-*/%=&|^!<>~?:@$",
-    features: CAPITALIZED_TYPES,
+    features: CAPITALIZED_TYPES | PRINTF_FORMAT,
     hook: Some(ml_hook),
     hook_chars: "'`{[~?la.",
     ..Spec::DEFAULT

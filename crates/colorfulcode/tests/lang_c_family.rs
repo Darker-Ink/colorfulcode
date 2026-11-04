@@ -289,7 +289,7 @@ fn objective_c_messages() {
     assert_tokens(
         "objective-c",
         "NSString *s = [[NSString alloc] initWithFormat:@\"%d\\n\", n];",
-        &[("alloc", Function), ("initWithFormat", Function), ("@\"%d", String), ("\\n", Escape)],
+        &[("alloc", Function), ("initWithFormat", Function), ("@\"", String), ("%d\\n", Escape)],
     );
     assert_tokens("objective-c", "- (void)dealloc {", &[("dealloc", Function)]);
     assert_tokens("objective-c", "switch (x) { case FOO: break; default: break; }", &[("FOO", Constant)]);
@@ -333,7 +333,14 @@ fn d_and_groovy() {
     assert_tokens(
         "groovy",
         "#!/usr/bin/env groovy\ndef s = \"v${major}.$minor\"\ndef re = ~/\\d+/",
-        &[("#!/usr/bin/env groovy", Comment), ("def", Keyword), ("$minor", Variable), ("/\\d+/", Regex)],
+        &[
+            ("#!/usr/bin/env groovy", Comment),
+            ("def", Keyword),
+            ("$minor", Variable),
+            ("/", Regex),
+            ("\\d", Escape),
+            ("+", Operator),
+        ],
     );
 }
 

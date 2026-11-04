@@ -1626,7 +1626,7 @@ static MATLAB_SPEC: Spec = Spec {
         "nargout", "varargin", "varargout", "numel", "class", "isa", "tic", "toc",
     ],
     constants: &["true", "false", "pi", "eps", "Inf", "inf", "NaN", "nan"],
-    features: MEMBERS,
+    features: MEMBERS | PRINTF_FORMAT,
     hook: Some(matlab_hook),
     hook_chars: "'%#abcdefghlmprs",
     ..Spec::DEFAULT

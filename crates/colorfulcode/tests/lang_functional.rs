@@ -349,7 +349,11 @@ fn unicode_symbols() {
             ("▸", Operator),
         ],
     );
-    assert_tokens("lean", "theorem foo (x₁ : ℕ) := s!\"{x₁}\"", &[("foo", Function), ("x₁", Text), ("s!\"", String)]);
+    assert_tokens(
+        "lean",
+        "theorem foo (x₁ : ℕ) := s!\"{x₁}\"",
+        &[("foo", Function), ("x₁", Parameter), ("s!\"", String)],
+    );
     let code = "+-comm : ∀ m → m + n ≡ n\nproof = begin m ≡⟨ refl ⟩ n ∎";
     assert_tokens(
         "agda",

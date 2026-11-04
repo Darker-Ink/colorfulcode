@@ -649,7 +649,7 @@ const BASH_RULES: Spec = Spec {
     builtins: BASH_BUILTINS,
     ident_chars: "-.",
     operators: "+-*%=&|^!<>~?",
-    features: COMMANDS | FLAGS,
+    features: COMMANDS | FLAGS | PRINTF_FORMAT,
     hook: Some(bash_hook),
     hook_chars: "#$<\"/.~+=",
     ..Spec::DEFAULT
@@ -1894,7 +1894,7 @@ static AWK_SPEC: Spec = Spec {
         "ARGV", "CONVFMT", "OFMT", "IGNORECASE", "PROCINFO",
     ],
     function_keywords: &["function", "func"],
-    features: CALLS | REGEX,
+    features: CALLS | REGEX | PRINTF_FORMAT,
     hook: Some(awk_hook),
     hook_chars: "$/",
     ..Spec::DEFAULT

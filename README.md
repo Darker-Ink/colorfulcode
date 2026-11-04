@@ -147,7 +147,7 @@ Options: `-l/--language`, `-t/--theme`, `-n/--line-numbers`, `--color auto|alway
 
 ## Token kinds
 
-`text`, `comment`, `keyword`, `string`, `escape`, `number`, `constant`, `function`, `type`, `variable`, `property`, `builtin`, `operator`, `punctuation`, `tag`, `attribute`, `meta`, `regex`, `heading`, `emphasis`, `strong`, `link`, `inserted`, `deleted`.
+`text`, `comment`, `keyword`, `string`, `escape`, `number`, `constant`, `function`, `type`, `variable`, `property`, `builtin`, `operator`, `punctuation`, `tag`, `attribute`, `meta`, `regex`, `heading`, `emphasis`, `strong`, `link`, `inserted`, `deleted`, `parameter`.
 
 With `theme: false` each token gets the class `cc-<kind>`, for example `cc-keyword`.
 

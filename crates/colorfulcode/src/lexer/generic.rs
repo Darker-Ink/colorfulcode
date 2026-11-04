@@ -60,6 +60,14 @@ pub mod features {
     pub const ASSIGN_KEYS: u32 = 1 << 19;
     /// `-` joins identifiers when a letter follows (`read-file`).
     pub const KEBAB: u32 = 1 << 20;
+    /// printf style placeholders (`%s`, `%5.2f`, `%(name)s`) in strings are escapes.
+    pub const PRINTF_FORMAT: u32 = 1 << 21;
+    /// Brace placeholders (`{}`, `{0}`, `{name:?}`, `{{`) in strings are escapes.
+    pub const BRACE_FORMAT: u32 = 1 << 22;
+    /// Parameters are written name first without a colon (`a, b int` in Go).
+    pub const PARAMS_NAME_FIRST: u32 = 1 << 23;
+    /// `lambda a, b:` declares parameters (Python).
+    pub const LAMBDA_PARAMS: u32 = 1 << 24;
 }
 
 /// String interpolation styles.
@@ -384,11 +392,33 @@ pub struct Lexer<'c, 's, 'o> {
     /// Byte that begins a nested group in `run_until` mode.
     stop_open: u8,
     stop_close: u8,
+    /// A function was just named, so the next `(` opens its parameter list.
+    expect_params: bool,
+    /// Start offsets of the parameter names found by the last parameter scan.
+    params: [u32; MAX_PARAMS],
+    param_count: usize,
 }
+
+const MAX_PARAMS: usize = 24;
+
+/// How far a parameter list may extend. Real ones are short, and the bound
+/// keeps lines full of unclosed `(` cheap.
+const PARAMS_MAX: usize = 1024;
 
 impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
     pub fn new(ctx: &'c mut Ctx<'s, 'o>, spec: &'static Spec) -> Self {
-        Lexer { ctx, spec, c: spec.compiled(), prev: Prev::Start, pending: None, stop_open: 0, stop_close: 0 }
+        Lexer {
+            ctx,
+            spec,
+            c: spec.compiled(),
+            prev: Prev::Start,
+            pending: None,
+            stop_open: 0,
+            stop_close: 0,
+            expect_params: false,
+            params: [0; MAX_PARAMS],
+            param_count: 0,
+        }
     }
 
     /// Lexes until the end of input.
@@ -535,7 +565,8 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
             if self.ctx.starts_with(c.as_bytes()) {
                 let start = self.ctx.pos;
                 self.ctx.skip_line();
-                self.ctx.emit_from(start, Kind::Comment);
+                let end = self.ctx.pos;
+                emit_comment(self.ctx, start, end);
                 return true;
             }
         }
@@ -568,12 +599,21 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
             Interp::Brace => b'{',
             Interp::BackslashParen => b'\\',
         };
+        // Format placeholders only make sense in ordinary strings.
+        let plain = kind == Kind::String;
+        let percent = if plain && self.spec.has(features::PRINTF_FORMAT) { b'%' } else { 0 };
+        let brace = if plain && interp != Interp::Brace && self.spec.has(features::BRACE_FORMAT) { b'{' } else { 0 };
         loop {
             // Fast scan to the next interesting byte.
             let rest = &self.ctx.src[self.ctx.pos..];
             let skip = rest
                 .iter()
-                .position(|&b| b == close[0] || b == b'\\' || b == b'\n' || (b == interp_byte && b != 0))
+                .position(|&b| {
+                    b == close[0]
+                        || b == b'\\'
+                        || b == b'\n'
+                        || (b != 0 && (b == interp_byte || b == percent || b == brace))
+                })
                 .unwrap_or(rest.len());
             self.ctx.pos += skip;
             if self.ctx.done() {
@@ -591,6 +631,16 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
                 self.ctx.emit_from(esc_start, Kind::Escape);
                 seg = self.ctx.pos;
                 continue;
+            }
+            if (b == percent || b == brace) && b != 0 {
+                if let Some(len) = placeholder_len(&self.ctx.src[self.ctx.pos..], b) {
+                    self.ctx.emit_from(seg, kind);
+                    let at = self.ctx.pos;
+                    self.ctx.pos += len;
+                    self.ctx.emit(at, self.ctx.pos, Kind::Escape);
+                    seg = self.ctx.pos;
+                    continue;
+                }
             }
             if self.ctx.starts_with(close) {
                 if rule.doubled && self.ctx.starts_with_at(self.ctx.pos + close.len(), close) {
@@ -718,6 +768,10 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
 
     /// Classifies a bare word, returning its kind.
     pub fn classify(&mut self, start: usize, end: usize) -> Kind {
+        if self.param_count > 0 && self.params[..self.param_count].contains(&(start as u32)) {
+            self.prev = Prev::Value;
+            return Kind::Parameter;
+        }
         let word = &self.ctx.src[start..end];
         let spec = self.spec;
         let after_pos = self.ctx.skip_spaces_from(end);
@@ -755,6 +809,11 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
                 Next::Function => Some(Kind::Function),
                 Next::Type => Some(Kind::Type),
             };
+            // `function (a, b)` and `fn name(a: T)` both open a parameter list.
+            self.expect_params = w.next == Next::Function;
+            if spec.has(features::LAMBDA_PARAMS) && word == b"lambda" {
+                self.scan_lambda_params(end);
+            }
             self.prev = match w.kind {
                 Kind::Keyword => Prev::Keyword,
                 _ => Prev::Value,
@@ -767,7 +826,16 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
             return Kind::Function;
         }
         if let Some(kind) = self.pending.take() {
+            self.expect_params = kind == Kind::Function;
             return kind;
+        }
+        // `x => x * 2`: a lone arrow function parameter.
+        if spec.has(features::ARROW_FUNCTIONS)
+            && after == b'='
+            && self.ctx.at(after_pos + 1) == b'>'
+            && self.ctx.prev_non_space(start) != b':'
+        {
+            return Kind::Parameter;
         }
         // `key : value` with spaces, as in Meson and JSON5; never `::` or `:=`.
         if spec.has(features::IDENT_KEYS) && after == b':' && !matches!(self.ctx.at(after_pos + 1), b':' | b'=') {
@@ -838,6 +906,236 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
             return false;
         }
         src[i..].starts_with(b"=>")
+    }
+
+    /// Whether the `(` at `open` starts the parameters of an arrow function:
+    /// `(a, b) => ...` or `(a: T): R => ...`.
+    fn arrow_params_ahead(&self, open: usize) -> bool {
+        if !self.spec.has(features::ARROW_FUNCTIONS) || self.prev == Prev::Value {
+            return false;
+        }
+        let Some(close) = paren_close_within(self.ctx.src, open, PARAMS_MAX) else {
+            return false;
+        };
+        let after = self.ctx.skip_spaces_from(close + 1);
+        if self.ctx.starts_with_at(after, b"=>") {
+            return true;
+        }
+        // A return type annotation: look for `=>` later on the same line.
+        self.ctx.at(after) == b':' && self.ctx.find_in(after, self.ctx.line_end_within(after, 256), b"=>").is_some()
+    }
+
+    /// Whether the `(` at `open` follows a function name and its list is
+    /// followed by a body: `int main(int argc) {`, `render(props) {`,
+    /// `fun area(r: Double): Double {`.
+    fn method_params_ahead(&self, open: usize) -> bool {
+        // `user(id: 1) {` in GraphQL style languages passes named arguments.
+        if open == 0
+            || self.spec.has(features::IDENT_KEYS)
+            || !self.is_ident_byte(self.ctx.src[open - 1])
+            || self.ctx.last_kind() != Some(Kind::Function)
+        {
+            return false;
+        }
+        // `if valid(x) {` and `match parse(s) {` are calls, not definitions.
+        let src = self.ctx.src;
+        let mut i = open;
+        while i > 0 && self.is_ident_byte(src[i - 1]) {
+            i -= 1;
+        }
+        while i > 0 && matches!(src[i - 1], b' ' | b'\t') {
+            i -= 1;
+        }
+        let word_end = i;
+        while i > 0 && src[i - 1].is_ascii_alphabetic() {
+            i -= 1;
+        }
+        if matches!(
+            &src[i..word_end],
+            b"if"
+                | b"elif"
+                | b"while"
+                | b"for"
+                | b"match"
+                | b"switch"
+                | b"return"
+                | b"else"
+                | b"unless"
+                | b"until"
+                | b"when"
+                | b"in"
+                | b"await"
+                | b"yield"
+                | b"case"
+                | b"and"
+                | b"or"
+                | b"not"
+                | b"guard"
+                | b"throw"
+        ) {
+            return false;
+        }
+        let Some(close) = paren_close_within(self.ctx.src, open, PARAMS_MAX) else {
+            return false;
+        };
+        let mut after = close + 1;
+        while matches!(self.ctx.at(after), b' ' | b'\t' | b'\n' | b'\r') && after - close < 64 {
+            after += 1;
+        }
+        match self.ctx.at(after) {
+            b'{' => true,
+            // A return type before the body: `): T {` or `) -> T {`.
+            b':' | b'-' => {
+                let end = self.ctx.line_end_within(after, 256);
+                self.ctx.src[after..end].contains(&b'{') && !self.ctx.src[after..end].contains(&b';')
+            }
+            _ => false,
+        }
+    }
+
+    /// Finds the parameter names in `[from, to)`, a comma separated list.
+    fn scan_params(&mut self, from: usize, to: usize) {
+        self.param_count = 0;
+        let mut seg = from;
+        let mut i = from;
+        let mut depth = 0i32;
+        let src = self.ctx.src;
+        while i < to {
+            match src[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b'<' => depth += 1,
+                b'>' if i > from && !matches!(src[i - 1], b'=' | b'-') => depth -= 1,
+                b'"' | b'\'' | b'`' => {
+                    let q = src[i];
+                    i += 1;
+                    while i < to && src[i] != q {
+                        i += if src[i] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b',' if depth <= 0 => {
+                    self.param_segment(seg, i);
+                    seg = i + 1;
+                    depth = 0;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        self.param_segment(seg, to);
+    }
+
+    /// `lambda a, b=1: ...` declares parameters up to the `:`.
+    fn scan_lambda_params(&mut self, from: usize) {
+        let end = self.ctx.line_end_within(from, 512);
+        let mut depth = 0i32;
+        for i in from..end {
+            match self.ctx.src[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b':' if depth == 0 => {
+                    self.scan_params(from, i);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Picks the parameter name out of one entry of a parameter list.
+    fn param_segment(&mut self, from: usize, to: usize) {
+        let src = self.ctx.src;
+        let mut words = [(0usize, 0usize); 8];
+        let mut count = 0;
+        let mut colon = None;
+        let mut eq = None;
+        let mut depth = 0i32;
+        let mut i = from;
+        while i < to {
+            let b = src[i];
+            match b {
+                b'(' | b'[' | b'{' | b'<' => {
+                    // Destructuring: `{ a, b = 1 }` or `[x, y]` as the whole entry.
+                    if depth == 0 && count == 0 && colon.is_none() && matches!(b, b'{' | b'[') {
+                        self.destructured_params(i + 1, to);
+                    }
+                    depth += 1;
+                }
+                b')' | b']' | b'}' | b'>' => depth -= 1,
+                b':' if depth == 0
+                    && colon.is_none()
+                    && src.get(i + 1) != Some(&b':')
+                    && (i == 0 || src[i - 1] != b':') =>
+                {
+                    colon = Some(i)
+                }
+                b'=' if depth == 0 && eq.is_none() && !matches!(src.get(i + 1), Some(b'=' | b'>')) => eq = Some(i),
+                b'"' | b'\'' | b'`' => break,
+                _ if depth == 0 && self.c.sets[b as usize] & SET_START != 0 => {
+                    let e = self.scan_ident(i).min(to);
+                    if count < words.len() && colon.is_none() && eq.is_none() {
+                        words[count] = (i, e);
+                        count += 1;
+                    }
+                    i = e;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        // Modifiers such as `mut`, `const` or `final` are never the name.
+        let mut names = words[..count].iter().filter(|(s, e)| self.lookup(&src[*s..*e]).is_none());
+        let name = if colon.is_some() || eq.is_some() || !self.spec.has(features::PARAMS_NAME_FIRST) {
+            // `a: T`, `T a`, `a = 1`, `*args`: the last word before any `:` or `=`.
+            names.next_back()
+        } else {
+            // `a int`, `a, b int`
+            names.next()
+        };
+        let Some(&(s, e)) = name else {
+            return;
+        };
+        let word = &src[s..e];
+        let lone_type = count == 1
+            && colon.is_none()
+            && self.spec.has(features::CAPITALIZED_TYPES)
+            && word[0].is_ascii_uppercase()
+            && !self.spec.has(features::PARAMS_NAME_FIRST);
+        if self.lookup(word).is_none() && !lone_type && self.param_count < MAX_PARAMS {
+            self.params[self.param_count] = s as u32;
+            self.param_count += 1;
+        }
+    }
+
+    /// Names bound by a destructuring pattern starting at `from`.
+    fn destructured_params(&mut self, from: usize, to: usize) {
+        let src = self.ctx.src;
+        let mut depth = 0i32;
+        let mut i = from;
+        while i < to && depth >= 0 {
+            let b = src[i];
+            match b {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                _ if depth == 0 && self.c.sets[b as usize] & SET_START != 0 => {
+                    let e = self.scan_ident(i).min(to);
+                    let next = self.ctx.at(self.ctx.skip_spaces_from(e));
+                    // `a`, `a = 1`, and the new name in `key: alias`.
+                    if matches!(next, b',' | b'}' | b']' | b'=' | b'\n' | b'\r')
+                        && self.lookup(&src[i..e]).is_none()
+                        && self.param_count < MAX_PARAMS
+                    {
+                        self.params[self.param_count] = i as u32;
+                        self.param_count += 1;
+                    }
+                    i = e;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
     }
 
     fn ident(&mut self) {
@@ -1016,6 +1314,20 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
                     self.ctx.emit(start, end, Kind::Operator);
                     self.prev = Prev::Start;
                 } else if b.is_ascii_punctuation() {
+                    // Go receivers: `func (s *Server) Handle(w Writer)`, both lists are parameters.
+                    let receiver = b == b'(' && self.expect_params && self.ctx.last_kind() == Some(Kind::Keyword);
+                    // Lisp parameter lists are vectors or nested lists, not argument lists.
+                    if b == b'('
+                        && !spec.has(features::LISP_CALLS)
+                        && (self.expect_params || self.arrow_params_ahead(start) || self.method_params_ahead(start))
+                    {
+                        if let Some(close) = paren_close_within(self.ctx.src, start, PARAMS_MAX) {
+                            self.scan_params(start + 1, close);
+                        }
+                    }
+                    if matches!(b, b'(' | b'{' | b';' | b'=') {
+                        self.expect_params = receiver;
+                    }
                     self.ctx.token(1, Kind::Punctuation);
                     match b {
                         b')' | b']' | b'}' => self.prev = Prev::Value,
@@ -1092,12 +1404,15 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
                 Some(_) => i += 1,
             }
         }
+        let body_end = i;
         i += 1;
         while self.ctx.at(i).is_ascii_alphabetic() {
             i += 1;
         }
         self.ctx.pos = i.min(self.ctx.len());
-        self.ctx.emit(start, self.ctx.pos, Kind::Regex);
+        emit_regex(self.ctx, start + 1, body_end);
+        self.ctx.emit(body_end, body_end + 1, Kind::Regex);
+        self.ctx.emit(body_end + 1, self.ctx.pos, Kind::Keyword);
         self.prev = Prev::Value;
         true
     }
@@ -1356,8 +1671,13 @@ fn angle_close(src: &[u8], lt: usize) -> Option<usize> {
 
 /// Offset of the `)` matching the `(` at `open`, skipping strings.
 fn paren_close(src: &[u8], open: usize) -> Option<usize> {
+    paren_close_within(src, open, 4096)
+}
+
+/// Like [`paren_close`] but gives up after `max` bytes.
+fn paren_close_within(src: &[u8], open: usize, max: usize) -> Option<usize> {
     let mut depth = 0;
-    let limit = (open + 4096).min(src.len());
+    let limit = (open + max).min(src.len());
     let mut i = open;
     while i < limit {
         match src[i] {
@@ -1417,7 +1737,278 @@ pub fn block_comment(ctx: &mut Ctx, open: &str, close: &str, nested: bool) {
             ctx.pos += 1;
         }
     }
-    ctx.emit_from(start, Kind::Comment);
+    let end = ctx.pos;
+    emit_comment(ctx, start, end);
+}
+
+/// Emits a comment, picking out the details inside it: `TODO` style markers
+/// in any comment, and in doc comments (`/** */`, `///`, `//!`) tags such as
+/// `@param {Type} name` and XML tags such as `<summary>`.
+pub fn emit_comment(ctx: &mut Ctx, start: usize, end: usize) {
+    let src = ctx.src;
+    let text = &src[start..end];
+    let doc = (text.starts_with(b"/**") && !text.starts_with(b"/**/"))
+        || text.starts_with(b"///")
+        || text.starts_with(b"//!");
+    let mut seg = start;
+    let mut i = start;
+    while i < end {
+        let b = src[i];
+        let boundary = i == start || !is_ident(src[i - 1]);
+        if b == b'@' && doc && boundary && ctx.at(i + 1).is_ascii_alphabetic() {
+            let mut j = i + 1;
+            while j < end && (is_ident(src[j]) || src[j] == b'-') {
+                j += 1;
+            }
+            ctx.emit(seg, i, Kind::Comment);
+            ctx.emit(i, j, Kind::Meta);
+            seg = j;
+            i = doc_tag_arguments(ctx, &src[i + 1..j], j, end, &mut seg);
+            continue;
+        }
+        if b == b'<' && doc && text.starts_with(b"///") && is_xml_tag_start(ctx.at(i + 1)) {
+            let close = src[i..end].iter().take(64).position(|&c| c == b'>').map(|p| i + p + 1);
+            if let Some(close) = close {
+                ctx.emit(seg, i, Kind::Comment);
+                ctx.emit(i, close, Kind::Tag);
+                seg = close;
+                i = close;
+                continue;
+            }
+        }
+        if boundary && matches!(b, b'T' | b'F' | b'H' | b'X' | b'N' | b'B') {
+            let mut j = i;
+            while j < end && src[j].is_ascii_uppercase() {
+                j += 1;
+            }
+            let word = &src[i..j];
+            let marker = matches!(word, b"TODO" | b"FIXME" | b"HACK" | b"XXX" | b"NOTE" | b"BUG");
+            if marker && (j == end || !is_ident(src[j])) {
+                ctx.emit(seg, i, Kind::Comment);
+                ctx.emit(i, j, Kind::Meta);
+                seg = j;
+            }
+            i = j.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+    ctx.emit(seg, end, Kind::Comment);
+}
+
+/// Length of a format placeholder at the start of `rest`: printf style when
+/// `kind` is `%`, brace style when it is `{`.
+fn placeholder_len(rest: &[u8], kind: u8) -> Option<usize> {
+    let at = |i: usize| rest.get(i).copied().unwrap_or(0);
+    let mut i = 1;
+    if kind == b'%' {
+        if at(1) == b'%' {
+            return Some(2);
+        }
+        if at(1) == b'(' {
+            // Python's `%(name)s`.
+            let close = rest.iter().take(40).position(|&b| b == b')')?;
+            i = close + 1;
+        }
+        while matches!(at(i), b'-' | b'+' | b'#' | b'0') {
+            i += 1;
+        }
+        while at(i).is_ascii_digit() || at(i) == b'*' {
+            i += 1;
+        }
+        if at(i) == b'.' {
+            i += 1;
+            while at(i).is_ascii_digit() || at(i) == b'*' {
+                i += 1;
+            }
+        }
+        while matches!(at(i), b'h' | b'l' | b'L' | b'q' | b'j' | b'z' | b't') && i < 12 {
+            i += 1;
+        }
+        if i == 1 && at(1).is_ascii_alphabetic() {
+            // strftime style (`%Y-%m-%d`) and the plain conversions.
+            return Some(2);
+        }
+        return b"diouxXeEfFgGaAcspnvTqbw".contains(&at(i)).then_some(i + 1);
+    }
+    if at(1) == b'{' {
+        return Some(2);
+    }
+    // `{}`, `{0}`, `{name}`, `{0.x}`, `{name!r}`, `{:>8}`, `{value:?}`.
+    while is_ident(at(i)) || matches!(at(i), b'.' | b'[' | b']') {
+        i += 1;
+        if i > 32 {
+            return None;
+        }
+    }
+    if at(i) == b'!' && at(i + 1).is_ascii_alphabetic() {
+        i += 2;
+    }
+    if at(i) == b':' {
+        i += 1;
+        while !matches!(at(i), b'}' | b'{' | b'"' | b'\'' | b'\n' | b' ' | 0) {
+            i += 1;
+            if i > 48 {
+                return None;
+            }
+        }
+    }
+    (at(i) == b'}').then_some(i + 1)
+}
+
+/// Emits a regular expression body (between the delimiters) with escapes,
+/// character classes, groups, quantifiers and anchors picked out. Everything
+/// else, and the delimiter just before `start`, keeps the regex color.
+pub fn emit_regex(ctx: &mut Ctx, start: usize, end: usize) {
+    let src = ctx.src;
+    let mut seg = start.saturating_sub(1);
+    let mut i = start;
+    let mut class = false;
+    // Emits the literal run before `at`, then `[at, to)` as `kind`.
+    let part = |ctx: &mut Ctx, seg: &mut usize, at: usize, to: usize, kind: Kind| {
+        ctx.emit(*seg, at, Kind::Regex);
+        ctx.emit(at, to, kind);
+        *seg = to;
+    };
+    while i < end {
+        let b = src[i];
+        match b {
+            b'\\' => {
+                // `\d`, `\x41`, `\u{1F600}`, `\k<name>` and escaped characters.
+                let mut j = (i + 2).min(end);
+                match ctx.at(i + 1) {
+                    b'x' => j = (i + 4).min(end),
+                    b'u' if ctx.at(i + 2) == b'{' => {
+                        j = src[i..end].iter().position(|&c| c == b'}').map_or(j, |p| i + p + 1)
+                    }
+                    b'u' => j = (i + 6).min(end),
+                    b'k' if ctx.at(i + 2) == b'<' => {
+                        j = src[i..end].iter().position(|&c| c == b'>').map_or(j, |p| i + p + 1)
+                    }
+                    _ => {}
+                }
+                // Keep multi byte characters whole.
+                while j < end && (src[j] & 0xC0) == 0x80 {
+                    j += 1;
+                }
+                part(ctx, &mut seg, i, j, Kind::Escape);
+                i = j;
+            }
+            b'[' if !class => {
+                class = true;
+                let j = i + 1 + (ctx.at(i + 1) == b'^') as usize;
+                part(ctx, &mut seg, i, j, Kind::Punctuation);
+                i = j;
+            }
+            b']' if class => {
+                class = false;
+                part(ctx, &mut seg, i, i + 1, Kind::Punctuation);
+                i += 1;
+            }
+            b'-' if class && src[i - 1] != b'[' && src[i - 1] != b'^' && ctx.at(i + 1) != b']' => {
+                part(ctx, &mut seg, i, i + 1, Kind::Operator);
+                i += 1;
+            }
+            b'(' if !class => {
+                // `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!` and `(?<name>`.
+                let mut j = i + 1;
+                if ctx.at(j) == b'?' {
+                    j += 1;
+                    match ctx.at(j) {
+                        b':' | b'=' | b'!' => j += 1,
+                        b'<' if matches!(ctx.at(j + 1), b'=' | b'!') => j += 2,
+                        b'<' | b'P' => j = src[j..end].iter().position(|&c| c == b'>').map_or(j + 1, |p| j + p + 1),
+                        _ => {}
+                    }
+                }
+                let j = j.min(end);
+                part(ctx, &mut seg, i, j, Kind::Punctuation);
+                i = j;
+            }
+            b')' if !class => {
+                part(ctx, &mut seg, i, i + 1, Kind::Punctuation);
+                i += 1;
+            }
+            b'*' | b'+' | b'?' | b'|' | b'^' | b'$' | b'.' if !class => {
+                part(ctx, &mut seg, i, i + 1, Kind::Operator);
+                i += 1;
+            }
+            b'{' if !class => {
+                // `{2}`, `{2,}` and `{2,5}` quantifiers.
+                let n = src[i + 1..end].iter().take_while(|c| c.is_ascii_digit() || **c == b',').count();
+                if n > 0 && ctx.at(i + 1 + n) == b'}' && i + n + 2 <= end {
+                    part(ctx, &mut seg, i, i + n + 2, Kind::Operator);
+                    i += n + 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    ctx.emit(seg, end, Kind::Regex);
+}
+
+fn is_xml_tag_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'/'
+}
+
+/// After a doc tag: an optional `{Type}` and, for tags that name something,
+/// the name (`@param {string} name`). Returns where scanning continues.
+fn doc_tag_arguments(ctx: &mut Ctx, tag: &[u8], mut i: usize, end: usize, seg: &mut usize) -> usize {
+    let src = ctx.src;
+    let skip_spaces = |mut i: usize| {
+        while i < end && matches!(src[i], b' ' | b'\t') {
+            i += 1;
+        }
+        i
+    };
+    i = skip_spaces(i);
+    if i < end && src[i] == b'{' {
+        // Balanced braces, so `{Array<{a: string}>}` stays one type.
+        let mut depth = 0;
+        let mut j = i;
+        while j < end && j - i < 256 {
+            match src[j] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b'\n' => break,
+                _ => {}
+            }
+            j += 1;
+        }
+        if j < end && src[j] == b'}' {
+            ctx.emit(*seg, i, Kind::Comment);
+            ctx.emit(i, j + 1, Kind::Type);
+            *seg = j + 1;
+            i = skip_spaces(j + 1);
+        }
+    }
+    let names_something = matches!(
+        tag,
+        b"param" | b"arg" | b"argument" | b"property" | b"prop" | b"template" | b"tparam" | b"typedef" | b"callback"
+    );
+    if names_something && i < end {
+        // `name`, `[name]`, `[name=default]` or `obj.field`.
+        let bracket = src[i] == b'[';
+        let name_start = if bracket { i + 1 } else { i };
+        let mut j = name_start;
+        while j < end && (is_ident(src[j]) || src[j] == b'.' || src[j] == b'$') {
+            j += 1;
+        }
+        if j > name_start {
+            ctx.emit(*seg, name_start, Kind::Comment);
+            ctx.emit(name_start, j, Kind::Parameter);
+            *seg = j;
+            return j;
+        }
+    }
+    i
 }
 
 /// Consumes an escape sequence starting at a backslash at the cursor.

@@ -83,6 +83,16 @@ impl<'s, 'o> Ctx<'s, 'o> {
         rest.len() >= s.len() && rest[..s.len()].eq_ignore_ascii_case(s)
     }
 
+    /// Kind of the last emitted token.
+    pub fn last_kind(&self) -> Option<Kind> {
+        self.out.last().map(|t| t.kind)
+    }
+
+    /// End offset of the last emitted token, or 0.
+    pub fn last_end(&self) -> usize {
+        self.out.last().map_or(0, |t| t.end as usize)
+    }
+
     /// Records a token. Gaps are filled with text and equal neighbors merged.
     #[inline]
     pub fn emit(&mut self, start: usize, end: usize, kind: Kind) {

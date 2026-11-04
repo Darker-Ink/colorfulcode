@@ -148,7 +148,9 @@ impl<'c, 's, 'o> Markup<'c, 's, 'o> {
                     self.ctx.emit(inner, e, Kind::Keyword);
                     inner = e;
                 }
-                self.ctx.embed(lang("typescript"), inner, close);
+                // Astro expressions may contain JSX; Svelte ones never do.
+                let code = if self.flavor == Flavor::Astro { lang("tsx") } else { lang("typescript") };
+                self.ctx.embed(code, inner, close);
                 self.ctx.pos = (close + 1).min(self.ctx.len());
                 self.ctx.emit(close, self.ctx.pos, Kind::Punctuation);
             }
@@ -488,7 +490,7 @@ pub(crate) static PHP_SPEC: Spec = Spec {
     type_keywords: &["class", "interface", "trait", "enum"],
     sigils: &[(b'$', Kind::Variable)],
     case_insensitive: true,
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PRINTF_FORMAT,
     hook: Some(php_hook),
     hook_chars: "<",
     ..Spec::DEFAULT

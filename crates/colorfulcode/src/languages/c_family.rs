@@ -130,7 +130,7 @@ static RUST_SPEC: Spec = Spec {
     constants: &["true", "false"],
     function_keywords: &["fn"],
     type_keywords: &["struct", "enum", "trait", "type", "union"],
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | BANG_MACROS,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | BANG_MACROS | BRACE_FORMAT,
     hook: Some(rust_hook),
     hook_chars: "'#rbc.",
     ..Spec::DEFAULT
@@ -170,7 +170,7 @@ static C_SPEC: Spec = Spec {
     builtins: C_BUILTINS,
     constants: &["NULL", "true", "false", "nullptr", "EOF"],
     type_keywords: &["struct", "enum", "union"],
-    features: CALLS | UPPER_CONSTANTS | MEMBERS | PREPROCESSOR,
+    features: CALLS | UPPER_CONSTANTS | MEMBERS | PREPROCESSOR | PRINTF_FORMAT,
     ..Spec::DEFAULT
 };
 
@@ -230,7 +230,14 @@ static CPP_SPEC: Spec = Spec {
     builtins: &["std", "cout", "cin", "cerr", "endl", "stdin", "stdout", "stderr"],
     constants: &["NULL", "true", "false", "nullptr"],
     type_keywords: &["class", "struct", "enum", "union"],
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PREPROCESSOR,
+    features: CALLS
+        | CONSTRUCTORS
+        | CAPITALIZED_TYPES
+        | UPPER_CONSTANTS
+        | MEMBERS
+        | PREPROCESSOR
+        | PRINTF_FORMAT
+        | BRACE_FORMAT,
     hook: Some(cpp_hook),
     hook_chars: "RuUL",
     ..Spec::DEFAULT
@@ -681,7 +688,7 @@ static GO_SPEC: Spec = Spec {
     constants: &["true", "false", "nil", "iota"],
     function_keywords: &["func"],
     type_keywords: &["type"],
-    features: CALLS | MEMBERS,
+    features: CALLS | MEMBERS | PRINTF_FORMAT | PARAMS_NAME_FIRST,
     hook: Some(go_hook),
     hook_chars: ".ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     ..Spec::DEFAULT
@@ -707,7 +714,7 @@ static JAVA_SPEC: Spec = Spec {
     variables: &["this"],
     constants: &["true", "false", "null"],
     type_keywords: &["class", "interface", "enum", "record"],
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS | PRINTF_FORMAT,
     ..Spec::DEFAULT
 };
 
@@ -912,7 +919,7 @@ static CSHARP_SPEC: Spec = Spec {
     variables: &["this"],
     constants: &["true", "false", "null"],
     type_keywords: &["class", "struct", "interface", "enum", "record", "new"],
-    features: CALLS | CAPITALIZED_TYPES | MEMBERS | PREPROCESSOR,
+    features: CALLS | CAPITALIZED_TYPES | MEMBERS | PREPROCESSOR | BRACE_FORMAT,
     hook: Some(csharp_hook),
     hook_chars: "\"$@[{ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     ..Spec::DEFAULT
@@ -947,7 +954,7 @@ static KOTLIN_SPEC: Spec = Spec {
     variables: &["this", "it", "field"],
     constants: &["true", "false", "null"],
     type_keywords: &["class", "interface", "object", "typealias"],
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS | PRINTF_FORMAT,
     ..Spec::DEFAULT
 };
 
@@ -1125,7 +1132,7 @@ static SCALA_SPEC: Spec = Spec {
     constants: &["true", "false", "null", "None"],
     function_keywords: &["def"],
     type_keywords: &["class", "trait", "object", "type", "enum"],
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS | PRINTF_FORMAT,
     hook: Some(scala_hook),
     hook_chars: "'\"",
     ..Spec::DEFAULT
@@ -1273,7 +1280,7 @@ static OBJC_SPEC: Spec = Spec {
     variables: &["self", "_cmd"],
     constants: &["nil", "Nil", "YES", "NO", "NULL", "true", "false"],
     type_keywords: &["struct", "enum", "union"],
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PREPROCESSOR,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | PREPROCESSOR | PRINTF_FORMAT,
     hook: Some(objc_hook),
     hook_chars: "@:])",
     ..Spec::DEFAULT
@@ -1352,7 +1359,7 @@ static ZIG_SPEC: Spec = Spec {
     constants: &["true", "false", "null", "undefined"],
     function_keywords: &["fn"],
     sigils: &[(b'@', Kind::Builtin)],
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS | BRACE_FORMAT,
     hook: Some(zig_hook),
     hook_chars: "\\",
     ..Spec::DEFAULT
@@ -1498,7 +1505,14 @@ static D_SPEC: Spec = Spec {
     variables: &["this"],
     constants: &["true", "false", "null", "__FILE__", "__LINE__"],
     type_keywords: &["class", "struct", "interface", "enum", "union", "template"],
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS | BANG_MACROS,
+    features: CALLS
+        | CONSTRUCTORS
+        | CAPITALIZED_TYPES
+        | UPPER_CONSTANTS
+        | MEMBERS
+        | ANNOTATIONS
+        | BANG_MACROS
+        | PRINTF_FORMAT,
     hook: Some(d_hook),
     hook_chars: "qe",
     ..Spec::DEFAULT
@@ -1751,7 +1765,7 @@ static V_SPEC: Spec = Spec {
     constants: &["true", "false", "none", "nil"],
     function_keywords: &["fn"],
     sigils: &[(b'$', Kind::Meta)],
-    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS,
+    features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | MEMBERS | PARAMS_NAME_FIRST,
     hook: Some(v_hook),
     hook_chars: "@",
     ..Spec::DEFAULT
