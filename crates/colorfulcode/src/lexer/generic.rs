@@ -885,33 +885,26 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
     fn command_position(&self, start: usize) -> bool {
         let src = self.ctx.src;
         let mut i = start;
-        while i > 0 && matches!(src[i - 1], b' ' | b'\t') {
-            i -= 1;
+        // Follow a few prefix words back (`sudo time make`); a bounded loop
+        // keeps chains like `sudo sudo sudo ...` linear.
+        for _ in 0..8 {
+            while i > 0 && matches!(src[i - 1], b' ' | b'\t') {
+                i -= 1;
+            }
+            if i == 0 || matches!(src[i - 1], b'\n' | b';' | b'|' | b'&' | b'(' | b'`' | b'{' | b'!') {
+                return true;
+            }
+            // After a keyword that introduces a command: `then echo`, `do make`.
+            let word_end = i;
+            while i > 0 && src[i - 1].is_ascii_alphabetic() {
+                i -= 1;
+            }
+            let prefix: &[u8] = &src[i..word_end];
+            if !PREFIX_WORDS.contains(&prefix) {
+                return false;
+            }
         }
-        if i == 0 || matches!(src[i - 1], b'\n' | b';' | b'|' | b'&' | b'(' | b'`' | b'{' | b'!') {
-            return true;
-        }
-        // After a keyword that introduces a command: `then echo`, `do make`.
-        let word_end = i;
-        while i > 0 && src[i - 1].is_ascii_alphabetic() {
-            i -= 1;
-        }
-        matches!(
-            &src[i..word_end],
-            b"then"
-                | b"do"
-                | b"else"
-                | b"elif"
-                | b"if"
-                | b"while"
-                | b"until"
-                | b"time"
-                | b"sudo"
-                | b"exec"
-                | b"command"
-                | b"xargs"
-                | b"env"
-        ) && self.command_position(i)
+        false
     }
 
     fn try_prefixed_string(&mut self, start: usize, end: usize) -> bool {
@@ -1390,6 +1383,12 @@ fn paren_close(src: &[u8], open: usize) -> Option<usize> {
     }
     None
 }
+
+/// Words after which the next word is again in command position.
+const PREFIX_WORDS: &[&[u8]] = &[
+    b"then", b"do", b"else", b"elif", b"if", b"while", b"until", b"time", b"sudo", b"exec", b"command", b"xargs",
+    b"env",
+];
 
 /// `ALL_CAPS` style names, at least two characters long.
 fn is_upper_constant(word: &[u8]) -> bool {
