@@ -665,3 +665,143 @@ fn aliases_and_file_names() {
         assert_eq!(Language::from_path(path).unwrap().id(), id, "{path}");
     }
 }
+
+#[test]
+fn bash_expansions_inside_double_quotes() {
+    assert_tokens(
+        "bash",
+        "OUT=\"${OUT_DIR:-./dist}/${name[*]} $1 $*\"",
+        &[("${OUT_DIR:-./dist}", Variable), ("${name[*]}", Variable), ("$1", Variable), ("$*", Variable)],
+    );
+    assert_not("bash", "x=\"${VAR:-x}\"", "VAR", Function);
+    assert_tokens("bash", "echo \"a\\\"b $(date +%F)\"", &[("\\\"", Escape), ("date", Function), ("+%F", Text)]);
+    assert_tokens("bash", "echo \"$\" '$HOME'", &[("\"$\"", String), ("'$HOME'", String)]);
+}
+
+#[test]
+fn bash_paths_are_words() {
+    assert_tokens(
+        "bash",
+        "./configure --prefix=/usr/local && /usr/bin/env python3 src/main.py > /dev/null",
+        &[
+            ("./configure", Function),
+            ("--prefix", Attribute),
+            ("/usr/local", Text),
+            ("/usr/bin/env", Function),
+            ("python3 src/main.py", Text),
+            (">", Operator),
+            ("/dev/null", Text),
+        ],
+    );
+    assert_tokens(
+        "bash",
+        "curl https://example.com/a?b=1 2>/dev/null\n. ~/.bashrc",
+        &[("https://example.com/a?b=1", Text), ("2", Number), ("/dev/null", Text), (".", Builtin), ("~/.bashrc", Text)],
+    );
+    assert_tokens("bash", "cd $HOME/src", &[("$HOME", Variable), ("/src", Text)]);
+    assert_tokens("bash", "for f in packages/*/; do sudo ./run; done", &[("packages/*/", Text), ("./run", Function)]);
+    assert_tokens("bash", "echo $(( a / 2 ))", &[("/", Operator), ("2", Number)]);
+    assert_tokens("bash", "gcc -I/usr/include -c x.c", &[("-I", Attribute), ("/usr/include", Text), ("-c", Attribute)]);
+}
+
+#[test]
+fn bash_heredoc_expansions_and_flags() {
+    assert_tokens(
+        "bash",
+        "cat <<EOF\nuser: $USER \\$x\nnow: $(date -u)\nEOF\necho done",
+        &[
+            ("EOF", String),
+            ("$USER", Variable),
+            ("\\$", Escape),
+            ("date", Function),
+            ("-u", Attribute),
+            ("echo", Builtin),
+        ],
+    );
+    assert_not("bash", "cat <<'EOF'\n$USER\nEOF", "$USER", Variable);
+    assert_tokens("bash", "set +e\nchmod +x run.sh", &[("+e", Attribute), ("+x", Attribute)]);
+}
+
+#[test]
+fn fish_function_names_use_the_engine() {
+    assert_tokens(
+        "fish",
+        "function greet --description 'hi'\n  echo hi\nend\ncd ~/src",
+        &[("function", Keyword), ("greet", Function), ("--description", Attribute), ("~/src", Text)],
+    );
+}
+
+#[test]
+fn batch_for_sets_and_delayed_variables_are_arguments() {
+    let code = "for %%f in (src\\*.c) do echo %%f\necho Built !COUNT! files ^| more\ngoto end";
+    assert_tokens("batch", code, &[("in", Keyword), ("%%f", Variable), ("!COUNT!", Variable), ("end", Function)]);
+    assert_not("batch", code, "src", Function);
+    assert_not("batch", code, "files", Function);
+    assert_not("batch", code, "more", Function);
+    assert_tokens("batch", "if errorlevel 1 call :fail \"x\"", &[("call", Keyword), (":fail", Function)]);
+}
+
+#[test]
+fn cmake_versions_are_one_number() {
+    assert_tokens("cmake", "project(app VERSION 1.2.0)", &[("VERSION", Keyword), ("1.2.0", Number)]);
+}
+
+#[test]
+fn nushell_commands_flags_and_quoted_names() {
+    assert_tokens(
+        "nushell",
+        "def \"main build\" [--verbose (-v)] { $env.HOME | path join src }",
+        &[
+            ("def", Keyword),
+            ("\"main build\"", Function),
+            ("--verbose", Attribute),
+            ("-v", Attribute),
+            ("path", Function),
+        ],
+    );
+    assert_tokens("nushell", "def f [p: path] { }", &[("p", Property), ("path", Type)]);
+}
+
+#[test]
+fn vim_comments_after_values() {
+    assert_tokens("vim", "let x = 1 \" note", &[("x", Variable), ("1", Number), ("\" note", Comment)]);
+    assert_tokens("vim", "echo \"a\" \"b\"", &[("\"a\"", String), ("\"b\"", String)]);
+    assert_tokens("vim", "call F(\"a\", \"b\")", &[("\"a\"", String), ("\"b\"", String)]);
+}
+
+#[test]
+fn ninja_build_outputs() {
+    assert_tokens(
+        "ninja",
+        "build $out/a.o | b.h: cc src/a.c\n",
+        &[
+            ("build", Keyword),
+            ("$out", Variable),
+            ("|", Operator),
+            (":", Operator),
+            ("cc", Function),
+            ("src/a.c", Text),
+        ],
+    );
+}
+
+#[test]
+fn long_lines_stay_linear() {
+    // Constructs that used to rescan the rest of the line or file.
+    let cases = [
+        ("dockerfile", "RUN a\nHEALTHCHECK x\n"),
+        ("apacheconf", "[a=1]"),
+        ("batch", "\"%a\" "),
+        ("powershell", "${x}"),
+        ("vim", "x \""),
+        ("gitignore", "["),
+        ("ninja", "build a: "),
+        ("makefile", "x: $(A:"),
+    ];
+    for (lang, unit) in cases {
+        let code = unit.repeat(200_000 / unit.len());
+        let start = std::time::Instant::now();
+        let _ = colorfulcode::highlight(&code, Language::find(lang).unwrap());
+        assert!(start.elapsed().as_secs_f64() < 2.0, "{lang} is slow on {unit:?}");
+    }
+}
