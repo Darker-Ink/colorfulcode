@@ -1366,7 +1366,7 @@ pub static HAXE: Definition =
 
 // Vala
 
-static VALA_TEMPLATE: Str = Str::quoted("\"").interp(Interp::Dollar);
+static VALA_TEMPLATE: Str = Str::quoted("\"").interp(Interp::DollarParen);
 
 /// Template strings `@"$name"` and `[Attributes]`.
 fn vala_hook(lx: &mut Lexer) -> bool {
@@ -1378,7 +1378,7 @@ fn vala_hook(lx: &mut Lexer) -> bool {
     }
     let start = lx.ctx.pos;
     lx.ctx.pos += 1;
-    lx.string(start, &VALA_TEMPLATE, false, Interp::Dollar);
+    lx.string(start, &VALA_TEMPLATE, false, Interp::DollarParen);
     true
 }
 

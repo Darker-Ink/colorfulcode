@@ -54,6 +54,12 @@ pub mod features {
     pub const ARROW_FUNCTIONS: u32 = 1 << 16;
     /// `Capitalized(` is a constructor or tuple struct and highlighted as a type.
     pub const CONSTRUCTORS: u32 = 1 << 17;
+    /// Like CALLS, but the `(` must follow the name directly (`f(x)`, not `f (x)`).
+    pub const TIGHT_CALLS: u32 = 1 << 18;
+    /// `name = value` anywhere marks `name` as a property (not `==` or `=>`).
+    pub const ASSIGN_KEYS: u32 = 1 << 19;
+    /// `-` joins identifiers when a letter follows (`read-file`).
+    pub const KEBAB: u32 = 1 << 20;
 }
 
 /// String interpolation styles.
@@ -68,6 +74,8 @@ pub enum Interp {
     Brace,
     /// `$name` and `${expr}`
     Dollar,
+    /// `$name`, `${expr}` and `$(expr)`, as in shells and Julia.
+    DollarParen,
     /// `\(expr)`
     BackslashParen,
 }
@@ -415,6 +423,21 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         (self.prev, self.pending, self.stop_open, self.stop_close) = saved;
     }
 
+    /// The kind a word has in this language's word lists, without side effects.
+    pub fn word_kind(&self, word: &[u8]) -> Option<Kind> {
+        self.lookup(word).map(|w| w.kind)
+    }
+
+    /// The kind the next identifier will get because of a preceding keyword (`fn`, `class`).
+    pub fn pending(&self) -> Option<Kind> {
+        self.pending
+    }
+
+    /// Makes the next identifier a `kind`, as `function_keywords` and `type_keywords` do.
+    pub fn set_pending(&mut self, kind: Option<Kind>) {
+        self.pending = kind;
+    }
+
     /// The previous token allows an expression to start here.
     pub fn expression_start(&self) -> bool {
         self.prev != Prev::Value
@@ -475,7 +498,12 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
             if set & SET_STRING != 0 && self.string_at_cursor() {
                 continue;
             }
-            if b.is_ascii_digit() || (b == b'.' && self.ctx.peek_at(1).is_ascii_digit() && !self.prev_is_ident()) {
+            if b.is_ascii_digit()
+                || (b == b'.'
+                    && self.ctx.peek_at(1).is_ascii_digit()
+                    && !self.prev_is_ident()
+                    && (self.ctx.pos == 0 || self.ctx.src[self.ctx.pos - 1] != b'.'))
+            {
                 self.number();
                 continue;
             }
@@ -496,17 +524,18 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
     }
 
     fn comment(&mut self) -> bool {
+        // Block markers first: they often extend a line marker (`#=` and `#`, `--[[` and `--`).
+        for &(open, close) in self.spec.block_comments {
+            if self.ctx.starts_with(open.as_bytes()) {
+                block_comment(self.ctx, open, close, self.spec.nested_comments);
+                return true;
+            }
+        }
         for c in self.spec.line_comments {
             if self.ctx.starts_with(c.as_bytes()) {
                 let start = self.ctx.pos;
                 self.ctx.skip_line();
                 self.ctx.emit_from(start, Kind::Comment);
-                return true;
-            }
-        }
-        for &(open, close) in self.spec.block_comments {
-            if self.ctx.starts_with(open.as_bytes()) {
-                block_comment(self.ctx, open, close, self.spec.nested_comments);
                 return true;
             }
         }
@@ -534,7 +563,7 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         let mut seg = start;
         let interp_byte = match interp {
             Interp::None => 0,
-            Interp::DollarBrace | Interp::Dollar => b'$',
+            Interp::DollarBrace | Interp::Dollar | Interp::DollarParen => b'$',
             Interp::HashBrace => b'#',
             Interp::Brace => b'{',
             Interp::BackslashParen => b'\\',
@@ -587,8 +616,8 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         }
     }
 
-    /// Changes the kind of all tokens from `start` to the cursor.
-    fn retag(&mut self, start: usize, kind: Kind) {
+    /// Changes the kind of everything from `start` to the cursor.
+    pub fn retag(&mut self, start: usize, kind: Kind) {
         let end = self.ctx.pos;
         self.ctx.truncate_to(start);
         self.ctx.emit(start, end, kind);
@@ -602,9 +631,9 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         let (open_len, close) = match interp {
             Interp::DollarBrace if next == b'{' => (2, b'}'),
             Interp::HashBrace if next == b'{' => (2, b'}'),
-            Interp::Dollar if next == b'{' => (2, b'}'),
-            Interp::Dollar if next == b'(' => (2, b')'),
-            Interp::Dollar if next.is_ascii_alphabetic() || next == b'_' => {
+            Interp::Dollar | Interp::DollarParen if next == b'{' => (2, b'}'),
+            Interp::DollarParen if next == b'(' => (2, b')'),
+            Interp::Dollar | Interp::DollarParen if next.is_ascii_alphabetic() || next == b'_' => {
                 self.ctx.emit_from(*seg, kind);
                 let mut end = pos + 1;
                 while is_ident(self.ctx.at(end)) {
@@ -647,7 +676,17 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
     pub fn scan_ident(&self, from: usize) -> usize {
         let src = self.ctx.src;
         let mut end = from;
-        while end < src.len() && self.set(src[end]) & SET_IDENT != 0 {
+        loop {
+            while end < src.len() && self.set(src[end]) & SET_IDENT != 0 {
+                end += 1;
+            }
+            let kebab = self.spec.has(features::KEBAB)
+                && end > from
+                && src.get(end) == Some(&b'-')
+                && src.get(end + 1).is_some_and(|b| b.is_ascii_alphabetic());
+            if !kebab {
+                break;
+            }
             end += 1;
         }
         if end < src.len() && self.set(src[end]) & SET_SUFFIX != 0 {
@@ -681,9 +720,14 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
     pub fn classify(&mut self, start: usize, end: usize) -> Kind {
         let word = &self.ctx.src[start..end];
         let spec = self.spec;
-        let after = self.ctx.next_non_space(end);
+        let after_pos = self.ctx.skip_spaces_from(end);
+        let after = self.ctx.at(after_pos);
         let before = if start > 0 { self.ctx.src[start - 1] } else { 0 };
-        let called = spec.has(features::CALLS) && after == b'(';
+        let called = if spec.has(features::TIGHT_CALLS) {
+            self.ctx.at(end) == b'('
+        } else {
+            spec.has(features::CALLS) && after == b'('
+        };
         // Members win over keywords: `promise.catch()`, `map.get(key)`.
         let arrow = before == b'>' && start >= 2 && self.ctx.src[start - 2] == b'-';
         if spec.has(features::MEMBERS) && (arrow || (before == b'.' && (start < 2 || self.ctx.src[start - 2] != b'.')))
@@ -692,7 +736,20 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
             self.pending = None;
             return if called { Kind::Function } else { Kind::Property };
         }
+        // `key:` directly followed by a colon is a key, even when the word is a keyword.
+        if spec.has(features::IDENT_KEYS) && self.ctx.at(end) == b':' && !matches!(self.ctx.at(end + 1), b':' | b'=') {
+            self.prev = Prev::Value;
+            self.pending = None;
+            return Kind::Property;
+        }
         if let Some(w) = self.lookup(word) {
+            if w.kind == Kind::Builtin {
+                // A name being defined wins over builtins: `def print`, `proc echo`.
+                if let Some(kind) = self.pending.take() {
+                    self.prev = Prev::Value;
+                    return kind;
+                }
+            }
             self.pending = match w.next {
                 Next::None => None,
                 Next::Function => Some(Kind::Function),
@@ -712,17 +769,14 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         if let Some(kind) = self.pending.take() {
             return kind;
         }
-        if spec.has(features::IDENT_KEYS) && after == b':' && self.ctx.at(self.ctx.skip_spaces_from(end) + 1) != b':' {
-            return Kind::Property;
-        }
-        if spec.has(features::LINE_KEYS)
-            && after == b'='
-            && self.ctx.at(self.ctx.skip_spaces_from(end) + 1) != b'='
-            && self.ctx.at_line_start(start)
+        if after == b'='
+            && !matches!(self.ctx.at(after_pos + 1), b'=' | b'>' | b'~')
+            && (spec.has(features::ASSIGN_KEYS) || (spec.has(features::LINE_KEYS) && self.ctx.at_line_start(start)))
         {
             return Kind::Property;
         }
         let first = word[0];
+        // `Point(1, 2)` is a type; all caps calls (`COUNT(x)`, `ASSERT(x)`) stay functions.
         if called
             && spec.has(features::CONSTRUCTORS)
             && first.is_ascii_uppercase()
@@ -868,7 +922,13 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         for rule in self.spec.strings {
             if self.ctx.starts_with_at(end, rule.open.as_bytes()) {
                 self.ctx.pos = end;
-                let interp = if interp == Interp::None { rule.interp } else { interp };
+                // A raw prefix (`r'...'`) also turns off the rule's interpolation unless
+                // another prefix asks for it (`rf"..."`).
+                let interp = match interp {
+                    Interp::None if raw => Interp::None,
+                    Interp::None => rule.interp,
+                    other => other,
+                };
                 self.string(start, rule, raw, interp);
                 return true;
             }
@@ -960,7 +1020,7 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
                         b'.' => {}
                         _ => {
                             self.prev = Prev::Start;
-                            if matches!(b, b'(' | b'{' | b';' | b',' | b'=') {
+                            if matches!(b, b'(' | b'[' | b'{' | b';' | b',' | b'=') {
                                 self.pending = None;
                             }
                         }

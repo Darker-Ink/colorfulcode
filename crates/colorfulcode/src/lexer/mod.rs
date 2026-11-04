@@ -188,6 +188,17 @@ impl<'s, 'o> Ctx<'s, 'o> {
         }
     }
 
+    /// Like [`Ctx::line_end`] but looks at most `max` bytes ahead. Use it in
+    /// hooks that run often, so a huge single line cannot make lexing quadratic.
+    pub fn line_end_within(&self, from: usize, max: usize) -> usize {
+        let from = from.min(self.src.len());
+        let limit = (from + max).min(self.src.len());
+        match self.src[from..limit].iter().position(|&b| b == b'\n') {
+            Some(i) => from + i,
+            None => limit,
+        }
+    }
+
     /// Offset of the first occurrence of `needle` at or after `from`.
     pub fn find(&self, from: usize, needle: &[u8]) -> Option<usize> {
         if needle.is_empty() || from > self.src.len() {

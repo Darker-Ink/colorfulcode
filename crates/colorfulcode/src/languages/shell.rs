@@ -128,9 +128,9 @@ const ANSI_C_STRING: Str = Str::quoted("'").multiline();
 static BASH_SPEC: Spec = Spec {
     line_comments: &["#"],
     strings: &[
-        Str::quoted("\"").multiline().interp(Interp::Dollar),
+        Str::quoted("\"").multiline().interp(Interp::DollarParen),
         Str::quoted("'").raw().multiline(),
-        Str::quoted("`").multiline().interp(Interp::Dollar),
+        Str::quoted("`").multiline().interp(Interp::DollarParen),
     ],
     keywords: &[
         "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do", "done", "in",

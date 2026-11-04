@@ -1351,9 +1351,9 @@ const JULIA_REGEX: Str = Str::quoted("\"").kind(Kind::Regex);
 static JULIA_SPEC: Spec = Spec {
     line_comments: &["#"],
     strings: &[
-        Str::quoted("\"\"\"").multiline().interp(Interp::Dollar),
-        Str::quoted("\"").multiline().interp(Interp::Dollar),
-        Str::quoted("`").interp(Interp::Dollar),
+        Str::quoted("\"\"\"").multiline().interp(Interp::DollarParen),
+        Str::quoted("\"").multiline().interp(Interp::DollarParen),
+        Str::quoted("`").interp(Interp::DollarParen),
     ],
     string_prefixes: &[Prefix::plain(b'b'), Prefix::raw(b'v')],
     keywords: &[
