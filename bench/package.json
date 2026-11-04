@@ -1,0 +1,14 @@
+{
+  "name": "colorfulcode-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "node compare.mjs"
+  },
+  "dependencies": {
+    "colorfulcode": "file:../packages/colorfulcode",
+    "highlight.js": "^11.11.1",
+    "prismjs": "^1.30.0",
+    "shiki": "^3.0.0"
+  }
+}
