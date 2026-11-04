@@ -1075,9 +1075,15 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         if next == b'/' || next == b'*' || next == b' ' {
             return false;
         }
+        // Real regex literals are short. Capping the scan keeps a long line full
+        // of `/` and unclosed `[` linear instead of quadratic.
+        let limit = (start + 1024).min(src.len());
         let mut i = start + 1;
         let mut class = false;
         loop {
+            if i >= limit {
+                return false;
+            }
             match src.get(i) {
                 None | Some(b'\n') => return false,
                 Some(b'\\') => i += 2,
