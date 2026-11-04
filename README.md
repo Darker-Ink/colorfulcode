@@ -19,7 +19,7 @@
 
 - **Fast.** Around 240 MB/s natively and 45 MB/s from JavaScript including HTML output. That is 11 to 33 times faster than Prism and highlight.js and over 100 times faster than Shiki ([benchmarks](#benchmarks)).
 - **Lots of languages.** 200 languages, including embedded ones: scripts and styles in HTML, fenced code in Markdown, Vue and Svelte components, and TSX with generic arrow functions.
-- **Small for what it does.** All 200 languages are 309 KiB gzipped, and the 55 most used ones are 130 KiB (`colorfulcode/common`). No dependencies.
+- **Small for what it does.** All 200 languages are 341 KiB gzipped, and the 55 most used ones are 161 KiB (`colorfulcode/common`). No dependencies.
 - **Zero setup.** Synchronous, so it works in SSR, React Server Components, Node, Deno, Bun and every bundler without configuration.
 - **Easy to render anywhere.** The output is a flat list of `(start, end, kind)` tokens plus theme colors, so native UIs can colorize text in a few lines.
 
@@ -48,7 +48,7 @@ Everything is styled inline, so no CSS is needed. Pass `theme={false}` to get cl
 | Prop | Type | Default | |
 | --- | --- | --- | --- |
 | `code` | `string` | | The source. A string child works too. |
-| `language` | `string` | `"text"` | Id, alias or file extension, for example `"ts"` or `"rs"`. |
+| `language` | `string` | `"text"` | Id, alias or file extension, for example `"ts"` or `"rs"`, or `"auto"` to guess it from the code. |
 | `theme` | `string \| object \| false` | `"colorful"` | A [theme](#themes) name or a [custom theme](#custom-themes) object for inline styles, or `false` for class names. |
 | `lineNumbers` | `boolean` | `false` | Show line numbers. |
 | `highlightLines` | `number[]` | | One based lines to highlight. |
@@ -75,13 +75,13 @@ const tokens = tokenize("const answer = 42;", "js");
 | `tokenizeLines(code, language)` | `{ text, kind }[][]`, one array per line. |
 | `highlightAll(options?, root?)` | Highlights every `<code class="language-xyz">` in the page. |
 | `highlightElement(element, options?)` | Highlights one element in place. |
-| `detectLanguage({ path?, code? })` | A language id from a file name or a shebang. |
+| `detectLanguage({ path?, code?, guess? })` | A language id from a file name or a shebang, and with `guess: true` from the code itself. `undefined` when unsure. |
 | `getLanguage(name)`, `listLanguages()` | Language info: `id`, `name`, `aliases`, `extensions`, `filenames`. |
 | `getTheme(name)`, `listThemes()` | Theme info with every color. |
 | `defineTheme(theme)` | Registers a [custom theme](#custom-themes) and returns its name. |
 | `themeCss(theme, selector?)` | CSS for class based output. Also shipped as `colorfulcode/themes/<name>.css`. |
 
-Unknown languages fall back to plain text.
+Unknown languages fall back to plain text. Pass `"auto"` as the language to guess it from the code first (plain text when unsure). Guessing only happens when asked for and takes well under a millisecond.
 
 ## Rust
 
@@ -107,7 +107,7 @@ let terminal = highlighted.to_ansi(theme, colorfulcode::ansi::ColorMode::TrueCol
 | `highlight(code, language) -> Highlighted` | Tokenizes the code. `highlight_into` reuses a token buffer. |
 | `Highlighted` | `tokens()`, `iter()` of `(text, kind)`, `lines()`, `utf16_tokens()`, `to_html()`, `to_ansi()`. |
 | `Token { start, end, kind }` | Byte offsets. Tokens cover the input exactly, with no gaps. |
-| `Language` | `find(name)`, `from_path(path)`, `from_content(code)`, `all()`, `id()`, `name()`. |
+| `Language` | `find(name)`, `from_path(path)`, `from_content(code)`, `all()`, `id()`, `name()`. `detect(code)` and `detect_among(code, candidates)` guess from the content and return `None` when unsure. |
 | `Theme` | `find(name)`, `all()`, `new(...)` for [custom themes](#custom-themes), `style(kind)`, `background`, `foreground`, `to_css(selector)`. |
 | `Kind` | The token category. See [kinds](#token-kinds). |
 
@@ -128,7 +128,7 @@ for (size_t i = 0; i < cc_tokens_len(tokens); i++) {
 cc_tokens_free(tokens);
 ```
 
-`CC_UTF16_OFFSETS` returns offsets in UTF-16 code units, which is what `NSString`, Java and Kotlin strings and .NET strings use. A full example lives in [`examples/c`](examples/c).
+`CC_UTF16_OFFSETS` returns offsets in UTF-16 code units, which is what `NSString`, Java and Kotlin strings and .NET strings use. `cc_language_detect(code, len)` guesses the language from the content, or returns -1. A full example lives in [`examples/c`](examples/c).
 
 ## Terminal
 
@@ -144,6 +144,8 @@ cat script.py | colorfulcode -l python
 </p>
 
 Options: `-l/--language`, `-t/--theme`, `-n/--line-numbers`, `--color auto|always|never`, `--html`, `--list-languages`, `--list-themes`.
+
+Without `-l` the language comes from the file name, a shebang, or else a guess from the content. `-l text` turns highlighting off.
 
 ## Token kinds
 
@@ -210,7 +212,7 @@ Native apps usually skip themes altogether and map each kind to colors from thei
 
 ## Smaller build
 
-`colorfulcode` includes every language (309 KiB gzipped). If you only need the popular ones, `colorfulcode/common` has 55 of them (130 KiB gzipped) with the same API:
+`colorfulcode` includes every language (341 KiB gzipped). If you only need the popular ones, `colorfulcode/common` has 55 of them (161 KiB gzipped) with the same API:
 
 ```js
 import { highlight } from "colorfulcode/common";
