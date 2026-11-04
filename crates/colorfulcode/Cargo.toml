@@ -1,0 +1,12 @@
+[package]
+name = "colorfulcode"
+description = "Fast syntax highlighting for a lot of languages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["syntax", "highlighting", "highlighter", "lexer", "wasm"]
+categories = ["text-processing", "parsing"]
+
+[dependencies]
