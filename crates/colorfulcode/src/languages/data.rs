@@ -2256,6 +2256,9 @@ pub static DOT: Definition =
 /// Directives (`%%{init: ...}%%`), node shapes (`A[label]`, `B((circle))`),
 /// edge labels (`-->|label|`) and message text after `: `.
 fn mermaid_hook(lx: &mut Lexer) -> bool {
+    if matches!(lx.ctx.peek(), b'-' | b'=' | b'.' | b'<' | b'~' | b'*') {
+        return mermaid_link(lx);
+    }
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     let line_end = ctx.line_end_within(start, 4096);
@@ -2297,6 +2300,12 @@ fn mermaid_hook(lx: &mut Lexer) -> bool {
             while end < line_end && end - close < 3 && matches!(ctx.src[end], b']' | b')' | b'}') {
                 end += 1;
             }
+            // The word before the shape is a node id.
+            let mut id = start;
+            while id > 0 && is_ident(ctx.src[id - 1]) {
+                id -= 1;
+            }
+            retag(ctx, id, Kind::Variable);
             ctx.emit(start, open_end, Kind::Punctuation);
             ctx.emit(open_end, text_end, Kind::String);
             ctx.emit(text_end, end, Kind::Punctuation);
@@ -2332,6 +2341,61 @@ fn mermaid_hook(lx: &mut Lexer) -> bool {
     true
 }
 
+/// A link or message arrow (`-->`, `-.->`, `==>`, `->>`, `<|--`, `~~~`): the
+/// words on both sides are node ids.
+fn mermaid_link(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    let mut end = start;
+    let mut line = false;
+    loop {
+        match ctx.at(end) {
+            b'-' | b'=' | b'~' => line = true,
+            b'.' | b'<' | b'>' | b'*' => {}
+            // `<|--` and `--|>` in class diagrams.
+            b'|' if ctx.at(end.wrapping_sub(1)) == b'<' || ctx.at(end + 1) == b'>' => {}
+            _ => break,
+        }
+        end += 1;
+    }
+    let dotted = ctx.starts_with(b"..");
+    if end - start < 2 || !(line || dotted) {
+        return false;
+    }
+    // `--x` and `--o` end in a cross or a circle.
+    if matches!(ctx.at(end), b'x' | b'o') && !is_ident(ctx.at(end + 1)) {
+        end += 1;
+    }
+    let mut word_end = start;
+    while word_end > 0 && matches!(ctx.src[word_end - 1], b' ' | b'\t') {
+        word_end -= 1;
+    }
+    let mut word = word_end;
+    while word > 0 && is_ident(ctx.src[word - 1]) {
+        word -= 1;
+    }
+    if word < word_end && (word == 0 || is_blank(ctx.src[word - 1]) || ctx.src[word - 1] == b';') {
+        ctx.truncate_to(word);
+        ctx.emit(word, word_end, Kind::Variable);
+    }
+    ctx.pos = end;
+    ctx.emit(start, end, Kind::Operator);
+    // The target follows, perhaps after a `|label|` or an activation `+`.
+    let mut next = ctx.skip_spaces_from(end);
+    if ctx.at(next) == b'|' {
+        let line_end = ctx.line_end_within(next + 1, 1024);
+        next = ctx.src[next + 1..line_end].iter().position(|&b| b == b'|').map_or(next, |i| next + i + 2);
+        next = ctx.skip_spaces_from(next);
+    }
+    if matches!(ctx.at(next), b'+' | b'-') {
+        next += 1;
+    }
+    let target = is_ident_start(ctx.at(next));
+    lx.mark_operator();
+    lx.set_pending(target.then_some(Kind::Variable));
+    true
+}
+
 static MERMAID_SPEC: Spec = Spec {
     line_comments: &["%%"],
     strings: &[Str::quoted("\"").raw()],
@@ -2347,7 +2411,7 @@ static MERMAID_SPEC: Spec = Spec {
     constants: &["true", "false"],
     operators: "-=.<>~&*+",
     hook: Some(mermaid_hook),
-    hook_chars: "%[({>|:",
+    hook_chars: "%[({>|:-=.<~*",
     ..Spec::DEFAULT
 };
 
@@ -2476,13 +2540,33 @@ fn log_level(word: &[u8]) -> Option<Kind> {
     (word == upper || word[1..].iter().all(u8::is_ascii_lowercase)).then_some(kind)
 }
 
+/// The level letter of a glog or klog line: `E0115 10:35:00.000000 ...`.
+fn klog_level(ctx: &Ctx, start: usize, word: &[u8]) -> Option<Kind> {
+    if word.len() != 5 || !word[1..].iter().all(u8::is_ascii_digit) || (start > 0 && ctx.src[start - 1] != b'\n') {
+        return None;
+    }
+    match word[0] {
+        b'E' | b'F' => Some(Kind::Deleted),
+        b'W' => Some(Kind::Constant),
+        b'I' => Some(Kind::Inserted),
+        _ => None,
+    }
+}
+
 fn log(ctx: &mut Ctx) {
     const MONTHS: &[&[u8]] =
         &[b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec"];
+    // A plain word came earlier on this line, so the message has started:
+    // `info` in "see docs for more info" is not a level.
+    let mut prose = false;
     while !ctx.done() {
         let start = ctx.pos;
         let b = ctx.peek();
         match b {
+            b'\n' => {
+                ctx.pos += 1;
+                prose = false;
+            }
             b'"' => quoted(ctx, Kind::String, ESC),
             b'\'' if start == 0 || !ctx.src[start - 1].is_ascii_alphanumeric() => {
                 let line_end = ctx.line_end_within(start, 1024);
@@ -2538,7 +2622,15 @@ fn log(ctx: &mut Ctx) {
                         }
                     }
                     Kind::Number
-                } else if let Some(kind) = log_level(word) {
+                } else if let Some(kind) = log_level(word).filter(|_| {
+                    // Lowercase levels count before the message or when delimited: `[info]`, `level=info`, `info:`.
+                    !prose
+                        || word.iter().all(|b| !b.is_ascii_lowercase())
+                        || (start > 0 && matches!(ctx.src[start - 1], b'[' | b'<' | b'(' | b'|' | b'='))
+                        || matches!(ctx.at(end), b']' | b'>' | b')' | b'|' | b':')
+                }) {
+                    kind
+                } else if let Some(kind) = klog_level(ctx, start, word) {
                     kind
                 } else if let Some(kind) = word.iter().rposition(|&b| b == b'.').and_then(|dot| {
                     log_level(&word[dot + 1..])
@@ -2557,13 +2649,15 @@ fn log(ctx: &mut Ctx) {
                     Kind::Property
                 } else if matches!(word, b"true" | b"false" | b"null" | b"nil" | b"None" | b"undefined") {
                     Kind::Constant
-                } else if (word.ends_with(b"Exception") || word.ends_with(b"Error"))
+                } else if ((word.len() > 9 && word.ends_with(b"Exception"))
+                    || (word.len() > 5 && word.ends_with(b"Error")))
                     && word.rsplit(|&b| b == b'.').next().is_some_and(|w| w.first().is_some_and(u8::is_ascii_uppercase))
                 {
                     Kind::Type
                 } else {
                     Kind::Text
                 };
+                prose |= kind == Kind::Text;
                 ctx.pos = end;
                 ctx.emit(start, end, kind);
             }
