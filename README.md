@@ -17,9 +17,9 @@
 
 ## Why
 
-- **Fast.** Over 200 MB/s natively and around 45 MB/s from JavaScript including HTML output. That is 10 to 30 times faster than highlight.js and Prism and over 100 times faster than Shiki ([benchmarks](#benchmarks)).
+- **Fast.** Around 240 MB/s natively and 45 MB/s from JavaScript including HTML output. That is 11 to 33 times faster than Prism and highlight.js and over 100 times faster than Shiki ([benchmarks](#benchmarks)).
 - **Lots of languages.** 200 languages, including embedded ones: scripts and styles in HTML, fenced code in Markdown, Vue and Svelte components, and TSX with generic arrow functions.
-- **Small.** One __WASM__ KiB WebAssembly module (__GZIP__ KiB gzipped) with no dependencies.
+- **Small for what it does.** All 200 languages are 309 KiB gzipped, and the 55 most used ones are 130 KiB (`colorfulcode/common`). No dependencies.
 - **Zero setup.** Synchronous, so it works in SSR, React Server Components, Node, Deno, Bun and every bundler without configuration.
 - **Easy to render anywhere.** The output is a flat list of `(start, end, kind)` tokens plus theme colors, so native UIs can colorize text in a few lines.
 
@@ -49,7 +49,7 @@ Everything is styled inline, so no CSS is needed. Pass `theme={false}` to get cl
 | --- | --- | --- | --- |
 | `code` | `string` | | The source. A string child works too. |
 | `language` | `string` | `"text"` | Id, alias or file extension, for example `"ts"` or `"rs"`. |
-| `theme` | `string \| false` | `"colorful"` | A [theme](#themes) for inline styles, or `false` for class names. |
+| `theme` | `string \| object \| false` | `"colorful"` | A [theme](#themes) name or a [custom theme](#custom-themes) object for inline styles, or `false` for class names. |
 | `lineNumbers` | `boolean` | `false` | Show line numbers. |
 | `highlightLines` | `number[]` | | One based lines to highlight. |
 | `inline` | `boolean` | `false` | Render a `<code>` for inline snippets instead of a `<pre>` block. |
@@ -70,7 +70,7 @@ const tokens = tokenize("const answer = 42;", "js");
 
 | Function | Returns |
 | --- | --- |
-| `highlight(code, language, options?)` | HTML. Options: `theme` (name or `false`), `pre` (wrap in `<pre><code>`, default `true`), `lineNumbers`, `lines`, `highlightLines`. |
+| `highlight(code, language, options?)` | HTML. Options: `theme` (name, theme object or `false`), `pre` (wrap in `<pre><code>`, default `true`), `lineNumbers`, `lines`, `highlightLines`. |
 | `tokenize(code, language)` | `{ start, end, kind, text }[]` covering the whole input. Offsets are string indices. |
 | `tokenizeLines(code, language)` | `{ text, kind }[][]`, one array per line. |
 | `highlightAll(options?, root?)` | Highlights every `<code class="language-xyz">` in the page. |
@@ -78,6 +78,7 @@ const tokens = tokenize("const answer = 42;", "js");
 | `detectLanguage({ path?, code? })` | A language id from a file name or a shebang. |
 | `getLanguage(name)`, `listLanguages()` | Language info: `id`, `name`, `aliases`, `extensions`, `filenames`. |
 | `getTheme(name)`, `listThemes()` | Theme info with every color. |
+| `defineTheme(theme)` | Registers a [custom theme](#custom-themes) and returns its name. |
 | `themeCss(theme, selector?)` | CSS for class based output. Also shipped as `colorfulcode/themes/<name>.css`. |
 
 Unknown languages fall back to plain text.
@@ -107,7 +108,7 @@ let terminal = highlighted.to_ansi(theme, colorfulcode::ansi::ColorMode::TrueCol
 | `Highlighted` | `tokens()`, `iter()` of `(text, kind)`, `lines()`, `utf16_tokens()`, `to_html()`, `to_ansi()`. |
 | `Token { start, end, kind }` | Byte offsets. Tokens cover the input exactly, with no gaps. |
 | `Language` | `find(name)`, `from_path(path)`, `from_content(code)`, `all()`, `id()`, `name()`. |
-| `Theme` | `find(name)`, `all()`, `style(kind)`, `background`, `foreground`, `to_css(selector)`. |
+| `Theme` | `find(name)`, `all()`, `new(...)` for [custom themes](#custom-themes), `style(kind)`, `background`, `foreground`, `to_css(selector)`. |
 | `Kind` | The token category. See [kinds](#token-kinds). |
 
 ## Native apps
@@ -209,7 +210,7 @@ Native apps usually skip themes altogether and map each kind to colors from thei
 
 ## Smaller build
 
-`colorfulcode` includes every language (__WASM__ KiB, __GZIP__ KiB gzipped). If you only need the popular ones, `colorfulcode/common` has 55 of them (__COMMON_WASM__ KiB, __COMMON_GZIP__ KiB gzipped) with the same API:
+`colorfulcode` includes every language (309 KiB gzipped). If you only need the popular ones, `colorfulcode/common` has 55 of them (130 KiB gzipped) with the same API:
 
 ```js
 import { highlight } from "colorfulcode/common";
@@ -221,15 +222,20 @@ It covers JavaScript, TypeScript, JSX, TSX, HTML, CSS, SCSS, Less, Sass, JSON, M
 ## Benchmarks
 
 <p align="center">
-  <img src="assets/race.webp" alt="colorfulcode, highlight.js, Prism and Shiki highlighting the same 200 KB of TypeScript" width="760">
+  <img src="assets/race.webp" alt="colorfulcode, Prism, highlight.js and Shiki highlighting the same 200 KB of TypeScript" width="760">
 </p>
 
 The race above is measured in Chromium and replayed in real time (`cd bench && npm run race` runs it in your browser).
 In Node 22, HTML output for about 100 KB of code per language (`bench/compare.mjs`):
 
-__BENCH__
+| Language | colorfulcode | Prism | highlight.js | Shiki |
+| --- | ---: | ---: | ---: | ---: |
+| TypeScript | **44.7 MB/s** | 1.9 MB/s (24x slower) | 1.3 MB/s (33x slower) | 0.2 MB/s (211x slower) |
+| Python | **54.1 MB/s** | 3.5 MB/s (15x slower) | 4.5 MB/s (12x slower) | 0.4 MB/s (155x slower) |
+| Rust | **43.1 MB/s** | 2.4 MB/s (18x slower) | 3.2 MB/s (14x slower) | 0.4 MB/s (120x slower) |
+| CSS | **44.9 MB/s** | 4.2 MB/s (11x slower) | 2.9 MB/s (15x slower) | 0.3 MB/s (144x slower) |
 
-The core alone tokenizes at __NATIVE__ MB/s on average across all sample files (`cargo run --release --example bench`).
+The core alone tokenizes at 240 MB/s on average across all sample files (`cargo run --release --example bench`).
 
 ## Languages
 
@@ -242,7 +248,7 @@ ABAP, ActionScript, Ada, Agda, Alloy, Apache, Apex, APL, AppleScript, ARM Assemb
 
 ## Examples
 
-- [`examples/react`](examples/react): the playground from the video above (`npm run dev -w colorfulcode-react-example`).
+- [`examples/react`](examples/react): the playground from the animation at the top (`npm run dev -w colorfulcode-react-example`).
 - [`examples/vanilla`](examples/vanilla): a static page using `highlightAll`.
 - [`examples/node`](examples/node): render a file to a standalone HTML page.
 - [`examples/c`](examples/c): highlight a file through the C library.
@@ -258,6 +264,8 @@ npm test                        # JavaScript and React tests
 ```
 
 Each language has a sample in `crates/colorfulcode/tests/samples` and a snapshot of its tokens. Run `UPDATE_SNAPSHOTS=1 cargo test -p colorfulcode --test snapshots` after changing a lexer, then review the diff.
+
+Two more tools help when working on a lexer: `cargo run --release --example fuzz <language>` looks for tokens that split characters, and `cargo run --release --example stress [language]` looks for inputs that make lexing slower than linear.
 
 ## License
 

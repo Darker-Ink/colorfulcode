@@ -22,8 +22,8 @@ const shiki = await createHighlighter({ themes: ["github-dark"], langs: cases.ma
 
 const engines = {
   colorfulcode: (code, c) => highlight(code, c.cc),
+  Prism: (code, c) => Prism.highlight(code, Prism.languages[c.prism], c.prism),
   "highlight.js": (code, c) => hljs.highlight(code, { language: c.hljs }).value,
-  "Prism": (code, c) => Prism.highlight(code, Prism.languages[c.prism], c.prism),
   "Shiki": (code, c) => shiki.codeToHtml(code, { lang: c.shiki, theme: "github-dark" }),
 };
 
