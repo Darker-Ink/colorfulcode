@@ -1,0 +1,52 @@
+module Main
+
+from "list" include List
+from "string" include String
+from "number" include Number
+
+/**
+ * Shapes and areas.
+ */
+enum Shape {
+  Circle(Number),
+  Rect(Number, Number),
+}
+
+record Item {
+  name: String,
+  mut quantity: Number,
+}
+
+// Computes the area of a shape.
+let area = shape => {
+  match (shape) {
+    Circle(r) => 3.14159 * r * r,
+    Rect(w, h) => w * h,
+  }
+}
+
+let rec factorial = n => if (n <= 1) 1 else n * factorial(n - 1)
+
+let describe = (item: Item) => {
+  if (item.quantity == 0) {
+    item.name ++ ": out of stock\n"
+  } else {
+    item.name ++ ": " ++ toString(item.quantity)
+  }
+}
+
+@unsafe
+let raw = 0x1F
+
+provide let main = () => {
+  let shapes = [Circle(2.0), Rect(3, 4)]
+  let total = List.reduce((acc, s) => acc + area(s), 0, shapes)
+  let item = { name: "widget", quantity: 5 }
+  item.quantity = item.quantity - 1
+  print(describe(item))
+  print(String.concat("total: ", toString(total)))
+  print((factorial(5), 'c', true, void))
+  while (item.quantity > 0) {
+    item.quantity -= 1
+  }
+}
