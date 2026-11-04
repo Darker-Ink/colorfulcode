@@ -176,6 +176,8 @@ fn typst_markup_and_code() {
     );
     // Code mode math.
     assert_tokens("typst", "#let e = $m c^2$", &[("#let", Keyword), ("$m", String), ("^", Operator)]);
+    // Calls need the `(` right after the name.
+    assert_not("typst", "#{ let y = x (1) }", "x", Function);
 }
 
 #[test]
@@ -412,6 +414,10 @@ fn pug_haml_and_slim() {
             ("f", Function),
         ],
     );
+    // Quoted attribute values are Ruby strings with interpolation.
+    for (id, code) in [("slim", "a href=\"/p/#{id}\" Go"), ("haml", "%a(href=\"/p/#{id}\") Go")] {
+        assert_tokens(id, code, &[("\"/p/", String), ("#{", Punctuation), ("id", Text), ("}", Punctuation)]);
+    }
 }
 
 #[test]

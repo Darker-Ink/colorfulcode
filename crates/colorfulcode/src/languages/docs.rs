@@ -1206,26 +1206,6 @@ static LIQUID_TEMPLATE: Template = Template {
 
 // Handlebars and Go templates
 
-/// `key=value` hash arguments.
-fn handlebars_hook(lx: &mut Lexer) -> bool {
-    let ctx = &mut *lx.ctx;
-    let at = ctx.pos;
-    if ctx.peek_at(1) == b'=' {
-        return false;
-    }
-    let mut s = at;
-    while s > 0 && (is_ident(ctx.src[s - 1]) || ctx.src[s - 1] == b'-') {
-        s -= 1;
-    }
-    if s < at {
-        ctx.truncate_to(s);
-        ctx.emit(s, at, Kind::Property);
-    }
-    ctx.token(1, Kind::Operator);
-    lx.mark_operator();
-    true
-}
-
 static HANDLEBARS_SPEC: Spec = Spec {
     strings: &[Str::quoted("\""), Str::quoted("'")],
     keywords: &["if", "unless", "each", "with", "else", "as", "lookup", "log", "let", "in", "yield"],
@@ -1233,9 +1213,8 @@ static HANDLEBARS_SPEC: Spec = Spec {
     variables: &["this"],
     sigils: &[(b'@', Kind::Variable)],
     ident_chars: "-",
-    features: MEMBERS | LISP_CALLS,
-    hook: Some(handlebars_hook),
-    hook_chars: "=",
+    // `key=value` hash arguments.
+    features: MEMBERS | LISP_CALLS | ASSIGN_KEYS,
     ..Spec::DEFAULT
 };
 
@@ -3055,7 +3034,7 @@ static TYPST_SPEC: Spec = Spec {
     constants: &["true", "false", "none", "auto"],
     types: &["int", "float", "str", "bool", "array", "dictionary", "content", "length", "ratio", "angle", "color"],
     ident_chars: "-",
-    features: CALLS | MEMBERS | IDENT_KEYS | UNITS,
+    features: TIGHT_CALLS | MEMBERS | IDENT_KEYS | UNITS,
     hook: Some(typst_hook),
     hook_chars: "[$",
     ..Spec::DEFAULT
@@ -3317,12 +3296,10 @@ fn attribute_list(ctx: &mut Ctx, open: usize, close: usize, language: Language) 
                 }
                 ctx.emit(i, i + op, Kind::Operator);
                 let v = ctx.skip_spaces_from(i + op).min(close);
+                // Values are code, so quoted ones get the language's own
+                // interpolation: `href="/posts/#{post.id}"`.
                 i = value_end(src, v, close, true);
-                if matches!(ctx.at(v), b'"' | b'\'') && i == value_end(src, v, close, true) && src[i - 1] == src[v] {
-                    ctx.emit(v, i, Kind::String);
-                } else {
-                    ctx.embed(language, v, i);
-                }
+                ctx.embed(language, v, i);
             }
         }
     }
@@ -3768,11 +3745,7 @@ fn slim_attributes(ctx: &mut Ctx, mut p: usize, end: usize) -> usize {
         ctx.emit(e, e + 1, Kind::Operator);
         let v = e + 1;
         let stop = value_end(src, v, end, false);
-        if matches!(ctx.at(v), b'"' | b'\'') {
-            ctx.emit(v, stop, Kind::String);
-        } else {
-            ctx.embed(RUBY, v, stop);
-        }
+        ctx.embed(RUBY, v, stop);
         p = stop;
     }
 }
