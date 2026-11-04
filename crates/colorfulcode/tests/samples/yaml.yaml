@@ -1,0 +1,47 @@
+%YAML 1.2
+---
+# Deployment configuration
+name: web-api
+version: 1.4.2
+replicas: 3
+ratio: 0.75
+enabled: true
+debug: off
+timeout: ~
+created: 2024-01-15T10:30:00Z
+hex: 0xFF
+infinity: -.inf
+"quoted key": "line\twith \"escapes\""
+'single': 'it''s fine'
+color: red # trailing comment
+url: http://example.com:8080/path#anchor
+base: &defaults
+  adapter: postgres
+  host: localhost
+development:
+  <<: *defaults
+  database: dev_db
+tags: [web, "api", 42, {nested: true}]
+env: {LOG_LEVEL: debug, PORT: 8080}
+items:
+  - name: first
+    value: 10
+  - name: second
+    script: |
+      echo "hello # not a comment"
+
+      exit 0
+    summary: >-
+      Folded text that
+      spans lines.
+  - - nested
+    - list
+  - !!str 123
+  - !custom
+    key: value
+? complex key
+: complex value
+description: plain scalar
+  continued here
+empty:
+...

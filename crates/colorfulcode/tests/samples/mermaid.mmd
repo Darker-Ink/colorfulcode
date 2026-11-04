@@ -1,0 +1,36 @@
+%%{init: {"theme": "dark", "flowchart": {"curve": "basis"}}}%%
+flowchart LR
+    %% Request handling
+    A[Client] -->|HTTP request| B(Load balancer)
+    B --> C{Healthy?}
+    C -->|yes| D[(Database)]
+    C -.->|no| E((Retry))
+    E ==> B
+    D --> F[/Report/]
+    subgraph backend [Backend services]
+        direction TB
+        G[[API]] --- H>Queue]
+    end
+    classDef warn fill:#f96,stroke:#333,stroke-width:2px
+    class E warn
+    click A "https://example.com" "Open site"
+
+sequenceDiagram
+    autonumber
+    participant U as User
+    actor Admin
+    U->>+Server: Login request
+    Server-->>-U: 200 OK
+    alt valid token
+        Server->>Admin: Notify
+    else expired
+        Server-xU: Reject
+    end
+    Note over U,Server: The session lasts 30 minutes
+    loop Every minute
+        U->>Server: Heartbeat
+    end
+
+pie title Languages
+    "Rust" : 42.5
+    "Go" : 30

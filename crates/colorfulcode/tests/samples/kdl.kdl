@@ -1,0 +1,39 @@
+// Package manifest
+package {
+    name "my-pkg"
+    version "1.2.3"
+    authors "Ada <ada@example.com>" "Grace"
+    license "MIT" spdx=#true
+    description """
+        A multi-line
+        description
+        """
+}
+
+dependencies platform="windows" {
+    winapi "1.0.0" path="./crates/my-winapi-fork"
+    serde "1.0" features=["derive"] optional=#false
+    regex #"\d{3}-\d{4}"# raw=r"C:\no\escapes"
+}
+
+/- disabled-node "this whole node is commented out" {
+    child 1
+}
+
+server host="localhost" port=8080 timeout=1.5e3 retries=-3 {
+    tls enabled=true cert=null
+    limits max-body=0x1F_FF /-ignored=1 burst=1_000
+    (u8)level 255
+    created (date)"2024-01-15"
+    path "/api/\"v1\"\n"
+}
+
+"quoted node" "arg"; other-node 42
+nested {
+    deep {
+        deeper "value" \
+            continued=#inf
+    }
+}
+/* block /* nested */ comment */
+empty-node

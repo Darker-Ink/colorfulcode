@@ -1,0 +1,21 @@
+(?x)                                  # extended mode: whitespace and comments
+^
+(?<year>\d{4}) - (?<month>0[1-9]|1[0-2]) - (?P<day>\d{2})   # ISO date
+(?:
+    T (\d{2}) : (\d{2})               # hours and minutes
+    (?: : \d{2} (?:\.\d+)? )?         # optional seconds and fraction
+)?
+(?= \s | $ )                          # lookahead
+[^\]\-a-z[:alpha:]]+?                 # negated class with a range
+\b \k<year> \1 \k'month' (?P=day)     # backreferences
+\x41 \u00e9 \x{1F600} \p{Lu} \P{L} \t \n \.
+.*? .+ a{2,} b{3} c{,5}+ d??
+(?#an inline comment)
+(?i: hello | wor.d )
+(?<! foo ) (?! bar ) (?> atomic )
+[]literal-bracket] [a\]b] [\w.-]
+\$ \^ \( \) \[ \{ \|
+\/ \d+ \D \w+ \W \s* \S \B \A \z \Z \G
+(?P<name> [A-Z][a-z]+ ) \s+ (?&name)?
+café € 日本
+$

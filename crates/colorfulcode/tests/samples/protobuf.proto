@@ -1,0 +1,48 @@
+// User service definitions.
+syntax = "proto3";
+
+package example.users.v1;
+
+import "google/protobuf/timestamp.proto";
+import public "common.proto";
+
+option go_package = "github.com/example/users/v1;usersv1";
+option java_multiple_files = true;
+
+/* A user account. */
+message User {
+  string id = 1;
+  string display_name = 2 [json_name = "displayName"];
+  int64 created_at = 3;
+  repeated string tags = 4;
+  map<string, double> scores = 5;
+  google.protobuf.Timestamp updated = 6;
+  optional bytes avatar = 7;
+  Status status = 8;
+
+  oneof contact {
+    string email = 10;
+    string phone = 11;
+  }
+
+  reserved 12, 15 to 20, 100 to max;
+  reserved "legacy_name";
+
+  message Address {
+    string street = 1;
+    fixed32 zip = 2 [deprecated = true];
+  }
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_ACTIVE = 1;
+  STATUS_BANNED = -1;
+}
+
+service UserService {
+  rpc GetUser(GetUserRequest) returns (User);
+  rpc ListUsers(ListUsersRequest) returns (stream User) {
+    option (google.api.http) = { get: "/v1/users" };
+  }
+}
