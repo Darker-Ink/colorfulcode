@@ -87,19 +87,14 @@ fn line_comment(ctx: &mut Ctx, start: usize) {
 }
 
 /// `kw name`: emits the keyword as `kinds.0` and the following name as
-/// `kinds.1`. Flags between them (`def --env name`, `set -gx name`) are
-/// attributes. With `seps`, `kw` must start a statement.
-fn keyword_then(lx: &mut Lexer, kw: &[u8], kinds: (Kind, Kind), seps: Option<&[u8]>) -> bool {
+/// `kinds.1`. Flags between them (`let --env name`, `set -gx name`) are
+/// attributes.
+fn keyword_then(lx: &mut Lexer, kw: &[u8], kinds: (Kind, Kind)) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     let end = start + kw.len();
     if !ctx.starts_with_ignore_case(kw) || !matches!(ctx.at(end), b' ' | b'\t') {
         return false;
-    }
-    if let Some(seps) = seps {
-        if !statement_start(ctx, start, seps) {
-            return false;
-        }
     }
     ctx.emit(start, end, kinds.0);
     let mut s = ctx.skip_spaces_from(end);
@@ -897,7 +892,7 @@ pub static POWERSHELL: Definition = Definition::new("powershell", "PowerShell", 
 
 fn fish_hook(lx: &mut Lexer) -> bool {
     if lx.ctx.peek() == b's' {
-        return keyword_then(lx, b"set", (Kind::Builtin, Kind::Variable), None);
+        return keyword_then(lx, b"set", (Kind::Builtin, Kind::Variable));
     }
     bash_hook(lx)
 }
@@ -2249,7 +2244,7 @@ static MESON_SPEC: Spec = Spec {
     builtins: &["meson", "host_machine", "build_machine", "target_machine"],
     constants: &["true", "false"],
     features: CALLS | MEMBERS | IDENT_KEYS,
-    hook: Some(|lx| keyword_then(lx, b"foreach", (Kind::Keyword, Kind::Variable), None)),
+    hook: Some(|lx| keyword_then(lx, b"foreach", (Kind::Keyword, Kind::Variable))),
     hook_chars: "f",
     ..Spec::DEFAULT
 };
@@ -2271,7 +2266,7 @@ fn ninja_hook(lx: &mut Lexer) -> bool {
         let end = scan(ctx, start, is_ident);
         let word = &ctx.src[start..end];
         if word == b"rule" || word == b"pool" {
-            return keyword_then(lx, word, (Kind::Keyword, Kind::Function), None);
+            return keyword_then(lx, word, (Kind::Keyword, Kind::Function));
         }
         if !matches!(word, b"build" | b"default" | b"include" | b"subninja") {
             return false;
@@ -2421,7 +2416,7 @@ fn vim_hook(lx: &mut Lexer) -> bool {
             }
             match &lx.ctx.src[start..end] {
                 b"let" | b"const" | b"var" | b"unlet" => {
-                    return keyword_then(lx, &lx.ctx.src[start..end], (Kind::Keyword, Kind::Variable), None)
+                    return keyword_then(lx, &lx.ctx.src[start..end], (Kind::Keyword, Kind::Variable))
                 }
                 b"set" | b"setlocal" | b"setglobal" | b"se" | b"setl" => {
                     vim_set(lx.ctx, start, end);
@@ -3189,7 +3184,7 @@ fn nu_hook(lx: &mut Lexer) -> bool {
     let end = lx.scan_ident(start);
     let word = &lx.ctx.src[start..end];
     if matches!(word, b"let" | b"mut" | b"const") {
-        return keyword_then(lx, word, (Kind::Keyword, Kind::Variable), None);
+        return keyword_then(lx, word, (Kind::Keyword, Kind::Variable));
     }
     // Commands that share a name with a type: `| path join`.
     let shared = matches!(word, b"path" | b"range" | b"table" | b"any" | b"glob");
