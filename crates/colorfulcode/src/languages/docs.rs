@@ -241,6 +241,67 @@ fn url_end(src: &[u8], at: usize, end: usize) -> Option<usize> {
     Some(at + e)
 }
 
+/// End of the text that inline markup opened on the line ending at `from` may
+/// wrap onto: the start of the next blank line or list item, at most `lines`
+/// lines on and never past `reach`.
+fn wrap_end(src: &[u8], from: usize, reach: usize, lines: usize) -> usize {
+    let line_end = |at: usize| src[at..reach].iter().position(|&b| b == b'\n').map_or(reach, |k| at + k);
+    let mut i = line_end(from.min(reach));
+    for _ in 0..lines {
+        if i >= reach {
+            return reach;
+        }
+        let next = i + 1;
+        let e = line_end(next);
+        let line = src[next..e].trim_ascii();
+        // List markers: `- `, `* `, `** `, `. `, `#. `, `1. ` and `1) `.
+        let marker = match line.iter().take_while(|b| b.is_ascii_digit()).count() {
+            0 => line.iter().take_while(|b| b"-*+.#".contains(b)).count(),
+            d if matches!(line.get(d), Some(b'.' | b')')) => d + 1,
+            _ => 0,
+        };
+        if line.is_empty() || (marker > 0 && matches!(line.get(marker), Some(b' ' | b'\t'))) {
+            return next;
+        }
+        i = e;
+    }
+    i
+}
+
+/// Closing `needle` of inline markup whose text starts at `from`: the first
+/// match within reach for which `ok` holds, on the line (before `end`) or on
+/// up to `lines` following lines of the paragraph.
+fn closer(
+    ctx: &Ctx,
+    from: usize,
+    end: usize,
+    lines: usize,
+    needle: &[u8],
+    ok: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let reach = near(from, ctx.len());
+    let search = |mut i: usize, limit: usize| {
+        while let Some(c) = ctx.find_in(i, limit, needle) {
+            if ok(c) {
+                return Some(c);
+            }
+            i = c + 1;
+        }
+        None
+    };
+    search(from, end.min(reach)).or_else(|| {
+        if lines == 0 || end >= reach {
+            return None;
+        }
+        search(end.max(from), wrap_end(ctx.src, end, reach, lines))
+    })
+}
+
+/// The end of the line holding `at`, without a carriage return.
+fn content_line_end(ctx: &Ctx, at: usize) -> usize {
+    start_of_cr(ctx, ctx.line_end(at))
+}
+
 // LaTeX
 
 fn latex(ctx: &mut Ctx) {
@@ -1634,7 +1695,7 @@ fn rst_line(ctx: &mut Ctx, start: usize, end: usize, ind: usize) -> bool {
             // Grid table rows.
             let mut p = at;
             for (i, _) in content.iter().enumerate().filter(|(_, &b)| b == b'|') {
-                rst_inline(ctx, p, at + i);
+                rst_inline(ctx, p, at + i, false);
                 ctx.emit(at + i, at + i + 1, Kind::Punctuation);
                 p = at + i + 1;
             }
@@ -1663,7 +1724,7 @@ fn rst_line(ctx: &mut Ctx, start: usize, end: usize, ind: usize) -> bool {
         ctx.emit(at, content_end, Kind::Punctuation);
         return true;
     }
-    rst_inline(ctx, p, content_end);
+    rst_inline(ctx, p, content_end, true);
     true
 }
 
@@ -1694,7 +1755,7 @@ fn rst_explicit(ctx: &mut Ctx, start: usize, end: usize, ind: usize) {
         if let Some(close) = src[p..line_end].iter().position(|&b| b == b']').map(|i| p + i) {
             ctx.emit(at, at + 2, Kind::Punctuation);
             ctx.emit(p, close + 1, Kind::Link);
-            rst_inline(ctx, close + 1, line_end);
+            rst_inline(ctx, close + 1, line_end, false);
             ctx.pos = line_end;
             return;
         }
@@ -1723,7 +1784,7 @@ fn rst_explicit(ctx: &mut Ctx, start: usize, end: usize, ind: usize) {
         ctx.emit(p, s, Kind::Variable);
     }
     if !directive {
-        rst_inline(ctx, name_start, line_end);
+        rst_inline(ctx, name_start, line_end, false);
         ctx.pos = line_end;
         return;
     }
@@ -1732,7 +1793,7 @@ fn rst_explicit(ctx: &mut Ctx, start: usize, end: usize, ind: usize) {
     ctx.emit(name_stop, name_stop + 2, Kind::Punctuation);
     let args = ctx.skip_spaces_from(name_stop + 2).min(line_end);
     if RST_PROSE_DIRECTIVES.contains(&name) {
-        rst_inline(ctx, args, line_end);
+        rst_inline(ctx, args, line_end, false);
     } else {
         ctx.emit(args, line_end, Kind::String);
     }
@@ -1775,26 +1836,28 @@ fn rst_opens(b: u8) -> bool {
     !b.is_ascii_alphanumeric() && b != b'\\' && b < 0x80
 }
 
-fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
+/// Inline markup in `[start, end)`. With `wrap`, a span may continue on the
+/// following lines of the paragraph, and lexing then goes on to the end of
+/// the line where it closes.
+fn rst_inline(ctx: &mut Ctx, start: usize, mut end: usize, wrap: bool) {
     let src = ctx.src;
+    let lines = if wrap { usize::MAX } else { 0 };
     let mut i = start;
     while i < end {
         let b = src[i];
         let opens = i == start || rst_opens(src[i - 1]);
         let next = if i + 1 < end { src[i + 1] } else { b' ' };
+        let mut span = None;
         match b {
             b'\\' if next.is_ascii_punctuation() || next.is_ascii_alphanumeric() => {
                 ctx.emit(i, i + 2, Kind::Escape);
                 i += 2;
             }
-            b'`' if opens && next == b'`' => match ctx.find_in(i + 2, end, b"``") {
-                Some(c) => {
-                    ctx.emit(i, c + 2, Kind::String);
-                    i = c + 2;
-                }
+            b'`' if opens && next == b'`' => match closer(ctx, i + 2, end, lines, b"``", |_| true) {
+                Some(c) => span = Some((c + 2, Kind::String)),
                 None => i += 2,
             },
-            b'`' if opens => match src[i + 1..end].iter().position(|&c| c == b'`').map(|k| i + 1 + k) {
+            b'`' if opens => match closer(ctx, i + 1, end, lines, b"`", |_| true) {
                 Some(c) => {
                     let mut e = c + 1;
                     let mut kind = Kind::String;
@@ -1802,9 +1865,7 @@ fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
                         kind = Kind::Link;
                         e += 1 + (ctx.at(e + 1) == b'_') as usize;
                     }
-                    let e = e.min(end);
-                    ctx.emit(i, e, kind);
-                    i = e;
+                    span = Some((e, kind));
                 }
                 None => i += 1,
             },
@@ -1831,17 +1892,14 @@ fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i = from;
                     continue;
                 }
-                match ctx.find_in(from + 1, end, delim).filter(|&c| !src[c - 1].is_ascii_whitespace()) {
-                    Some(c) => {
-                        ctx.emit(i, c + delim.len(), if strong { Kind::Strong } else { Kind::Emphasis });
-                        i = c + delim.len();
-                    }
+                match closer(ctx, from + 1, end, lines, delim, |c| !src[c - 1].is_ascii_whitespace()) {
+                    Some(c) => span = Some((c + delim.len(), if strong { Kind::Strong } else { Kind::Emphasis })),
                     None => i = from,
                 }
             }
             b'|' if opens && !next.is_ascii_whitespace() && next != b'|' => {
-                match src[i + 1..end].iter().position(|&c| c == b'|').map(|k| i + 1 + k) {
-                    Some(c) if !src[c - 1].is_ascii_whitespace() => {
+                match closer(ctx, i + 1, end, 0, b"|", |c| !src[c - 1].is_ascii_whitespace()) {
+                    Some(c) => {
                         let mut e = c + 1;
                         while e < end && src[e] == b'_' && e < c + 3 {
                             e += 1;
@@ -1849,10 +1907,10 @@ fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
                         ctx.emit(i, e, Kind::Variable);
                         i = e;
                     }
-                    _ => i += 1,
+                    None => i += 1,
                 }
             }
-            b'[' if opens => match src[i..end].iter().position(|&c| c == b']').map(|k| i + k) {
+            b'[' if opens => match closer(ctx, i, end, 0, b"]", |_| true) {
                 Some(c) if ctx.at(c + 1) == b'_' && c + 2 <= end => {
                     ctx.emit(i, c + 2, Kind::Link);
                     i = c + 2;
@@ -1876,6 +1934,14 @@ fn rst_inline(ctx: &mut Ctx, start: usize, end: usize) {
                 i = e;
             }
             _ => i += 1,
+        }
+        if let Some((e, kind)) = span {
+            ctx.emit(i, e, kind);
+            i = e;
+            if e > end {
+                end = content_line_end(ctx, e);
+                ctx.pos = ctx.line_end(e);
+            }
         }
     }
     ctx.pos = ctx.pos.max(end);
@@ -2054,7 +2120,10 @@ fn adoc_opens(b: u8) -> bool {
     !b.is_ascii_alphanumeric() && b != b'\\' && b < 0x80
 }
 
-fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
+/// Inline markup in `[start, end)`. A span may continue on the following
+/// lines of the paragraph, and lexing then goes on to the end of the line
+/// where it closes.
+fn adoc_inline(ctx: &mut Ctx, start: usize, mut end: usize) {
     let src = ctx.src;
     let mut i = start;
     while i < end {
@@ -2078,8 +2147,8 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i = from;
                     continue;
                 }
-                let close = ctx.find_in(from + 1, end, delim).filter(|&c| {
-                    !src[c - 1].is_ascii_whitespace() && (double || c + 1 >= end || !src[c + 1].is_ascii_alphanumeric())
+                let close = closer(ctx, from + 1, end, usize::MAX, delim, |c| {
+                    !src[c - 1].is_ascii_whitespace() && (double || !ctx.at(c + 1).is_ascii_alphanumeric())
                 });
                 match close {
                     Some(c) => {
@@ -2088,8 +2157,13 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
                             b'_' | b'#' => Kind::Emphasis,
                             _ => Kind::String,
                         };
-                        ctx.emit(i, c + delim.len(), kind);
-                        i = c + delim.len();
+                        let e = c + delim.len();
+                        ctx.emit(i, e, kind);
+                        i = e;
+                        if e > end {
+                            end = content_line_end(ctx, e);
+                            ctx.pos = ctx.line_end(e);
+                        }
                     }
                     None => i = from,
                 }
@@ -2103,7 +2177,7 @@ fn adoc_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i += 1;
                 }
             }
-            b'<' if next == b'<' => match ctx.find_in(i + 2, end, b">>") {
+            b'<' if next == b'<' => match closer(ctx, i + 2, end, 0, b">>", |_| true) {
                 Some(c) => {
                     ctx.emit(i, c + 2, Kind::Link);
                     i = c + 2;
@@ -2240,11 +2314,11 @@ fn org_line(ctx: &mut Ctx, start: usize, end: usize) {
         }
         let mut p = at;
         while let Some(i) = src[p..line_end].iter().position(|&b| b == b'|') {
-            org_inline(ctx, p, p + i);
+            org_inline(ctx, p, p + i, false);
             ctx.emit(p + i, p + i + 1, Kind::Punctuation);
             p += i + 1;
         }
-        org_inline(ctx, p, line_end);
+        org_inline(ctx, p, line_end, false);
         return;
     }
     let mut p = at;
@@ -2272,7 +2346,7 @@ fn org_line(ctx: &mut Ctx, start: usize, end: usize) {
             p = i + 3;
         }
     }
-    org_inline(ctx, p, line_end);
+    org_inline(ctx, p, line_end, true);
 }
 
 /// `#+KEY: value` lines and `#+BEGIN_...` blocks.
@@ -2345,7 +2419,9 @@ fn org_closes(b: u8) -> bool {
     )
 }
 
-fn org_inline(ctx: &mut Ctx, start: usize, end: usize) {
+/// Inline markup in `[start, end)`. Emphasis may continue on the next line,
+/// and lexing then goes on to the end of that line.
+fn org_inline(ctx: &mut Ctx, start: usize, mut end: usize, wrap: bool) {
     let src = ctx.src;
     let mut i = start;
     while i < end {
@@ -2358,15 +2434,8 @@ fn org_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     i += 1;
                     continue;
                 }
-                let close = src[i + 2..end]
-                    .iter()
-                    .enumerate()
-                    .position(|(k, &c)| {
-                        let at = i + 2 + k;
-                        c == b && !src[at - 1].is_ascii_whitespace() && org_closes(ctx.at(at + 1))
-                    })
-                    .map(|k| i + 2 + k);
-                match close {
+                let ok = |c: usize| !src[c - 1].is_ascii_whitespace() && org_closes(ctx.at(c + 1));
+                match closer(ctx, i + 2, end, wrap as usize, &src[i..i + 1], ok) {
                     Some(c) => {
                         let kind = match b {
                             b'*' => Kind::Strong,
@@ -2376,36 +2445,40 @@ fn org_inline(ctx: &mut Ctx, start: usize, end: usize) {
                         };
                         ctx.emit(i, c + 1, kind);
                         i = c + 1;
+                        if c >= end {
+                            end = content_line_end(ctx, c);
+                            ctx.pos = ctx.line_end(c);
+                        }
                     }
                     None => i += 1,
                 }
             }
-            b'[' if ctx.at(i + 1) == b'[' => match ctx.find_in(i + 2, end, b"]]") {
+            b'[' if ctx.at(i + 1) == b'[' => match closer(ctx, i + 2, end, 0, b"]]", |_| true) {
                 Some(c) => {
                     ctx.emit(i, c + 2, Kind::Link);
                     i = c + 2;
                 }
                 None => i += 2,
             },
-            b'[' if src[i..end].starts_with(b"[fn:") => match src[i..end].iter().position(|&c| c == b']') {
+            b'[' if src[i..end].starts_with(b"[fn:") => match closer(ctx, i, end, 0, b"]", |_| true) {
                 Some(c) => {
-                    ctx.emit(i, i + c + 1, Kind::Link);
-                    i += c + 1;
+                    ctx.emit(i, c + 1, Kind::Link);
+                    i = c + 1;
                 }
                 None => i += 1,
             },
             b'<' | b'[' if ctx.at(i + 1).is_ascii_digit() && ctx.at(i + 5) == b'-' => {
                 // Timestamps: <2024-03-01 Fri 10:00> and [2024-03-01].
-                let close = if b == b'<' { b'>' } else { b']' };
-                match src[i..end].iter().position(|&c| c == close) {
+                let close: &[u8] = if b == b'<' { b">" } else { b"]" };
+                match closer(ctx, i, end, 0, close, |_| true) {
                     Some(c) => {
-                        ctx.emit(i, i + c + 1, Kind::Constant);
-                        i += c + 1;
+                        ctx.emit(i, c + 1, Kind::Constant);
+                        i = c + 1;
                     }
                     None => i += 1,
                 }
             }
-            b'<' if ctx.at(i + 1) == b'<' => match ctx.find_in(i + 2, end, b">>") {
+            b'<' if ctx.at(i + 1) == b'<' => match closer(ctx, i + 2, end, 0, b">>", |_| true) {
                 Some(c) => {
                     ctx.emit(i, c + 2, Kind::Link);
                     i = c + 2;
@@ -2424,7 +2497,7 @@ fn org_inline(ctx: &mut Ctx, start: usize, end: usize) {
                     ctx.emit(i, w + 1, Kind::Keyword);
                     i = w + 1;
                 } else if word.starts_with(b"src_") && ctx.at(w) == b'{' {
-                    let c = src[w..end].iter().position(|&c| c == b'}').map_or(end, |k| w + k + 1);
+                    let c = closer(ctx, w, end, 0, b"}", |_| true).map_or(end, |c| c + 1);
                     ctx.emit(i, c, Kind::String);
                     i = c;
                 } else {

@@ -490,3 +490,27 @@ fn pug_inline_tags() {
     );
     assert_not("pug", "p a \\#[no] b", "no", Tag);
 }
+
+#[test]
+fn inline_markup_wraps_within_a_paragraph() {
+    let code = "Some *wrapped\nemphasis* and ``a\nliteral`` here *x\n\nnot* closed.";
+    assert_tokens("rst", code, &[("*wrapped\nemphasis*", Emphasis), ("``a\nliteral``", String)]);
+    assert_not("rst", code, "*x\n\nnot*", Emphasis);
+    let code = "Some *wrapped\nstrong* then _more_.\n\n- item *one\n- item two*";
+    assert_tokens("asciidoc", code, &[("*wrapped\nstrong*", Strong), ("_more_", Emphasis)]);
+    assert_not("asciidoc", code, "*one\n- item two*", Strong);
+    // Org emphasis spans at most two lines.
+    let code = "Some /wrapped\ntext/ and =a\nb\nc= end.";
+    assert_tokens("org", code, &[("/wrapped\ntext/", Emphasis)]);
+    assert_not("org", code, "=a\nb\nc=", String);
+}
+
+#[test]
+fn unclosed_inline_markup_on_long_lines_stays_linear() {
+    let line = "*a `b ``c |d [e <<f ".repeat(20_000);
+    for id in ["rst", "asciidoc", "org"] {
+        let start = std::time::Instant::now();
+        let _ = colorfulcode::highlight(&line, Language::find(id).unwrap());
+        assert!(start.elapsed().as_secs() < 2, "{id} is too slow on a long line");
+    }
+}
