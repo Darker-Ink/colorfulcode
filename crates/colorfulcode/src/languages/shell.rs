@@ -629,7 +629,7 @@ fn fish_hook(lx: &mut Lexer) -> bool {
 
 static FISH_SPEC: Spec = Spec {
     line_comments: &["#"],
-    strings: &[Str::quoted("\"").multiline().interp(Interp::Dollar), Str::quoted("'").multiline()],
+    strings: &[Str::quoted("\"").multiline().interp(Interp::DollarParen), Str::quoted("'").multiline()],
     keywords: &[
         "if", "else", "end", "switch", "case", "for", "in", "while", "begin", "and", "or", "not", "return", "break",
         "continue", "function",

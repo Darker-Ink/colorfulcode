@@ -704,11 +704,9 @@ fn toml_scalar(ctx: &mut Ctx) {
 // INI
 
 pub static INI: Definition = Definition::new("ini", "INI", Engine::Custom(ini))
-    .aliases(&["dosini", "cfg", "editorconfig", "gitconfig"])
+    .aliases(&["dosini", "cfg", "editorconfig"])
     .extensions(&["ini", "cfg", "conf", "cnf", "prefs", "inf", "desktop"])
-    .filenames(&[
-        ".editorconfig", ".gitconfig", ".gitmodules", ".npmrc", ".pylintrc", ".flake8", ".coveragerc", ".hgrc",
-    ]);
+    .filenames(&[".editorconfig", ".npmrc", ".pylintrc", ".flake8", ".coveragerc", ".hgrc"]);
 
 fn ini(ctx: &mut Ctx) {
     while !ctx.done() {

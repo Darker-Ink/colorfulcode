@@ -769,6 +769,10 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         if let Some(kind) = self.pending.take() {
             return kind;
         }
+        // `key : value` with spaces, as in Meson and JSON5; never `::` or `:=`.
+        if spec.has(features::IDENT_KEYS) && after == b':' && !matches!(self.ctx.at(after_pos + 1), b':' | b'=') {
+            return Kind::Property;
+        }
         if after == b'='
             && !matches!(self.ctx.at(after_pos + 1), b'=' | b'>' | b'~')
             && (spec.has(features::ASSIGN_KEYS) || (spec.has(features::LINE_KEYS) && self.ctx.at_line_start(start)))
