@@ -1,6 +1,16 @@
-# Process types
+# Process types for the web application.
+# Each line is `name: command`; the platform sets $PORT.
+
 web: bundle exec puma -C config/puma.rb -p ${PORT:-3000}
-worker: bundle exec sidekiq -q default -q mailers
+worker: bundle exec sidekiq -q default -q mailers --concurrency "${WORKERS:-5}"
 release: bin/rails db:migrate && echo "migrated"
 clock: bundle exec clockwork lib/clock.rb
+
+# Front end assets during development
 assets-watch: npm run watch -- --color
+css: tailwindcss -i app/input.css -o public/app.css --watch=always
+
+# One off maintenance
+console: bin/rails console --sandbox
+scheduler: env RAILS_ENV=production ruby scripts/scheduler.rb > log/scheduler.log 2>&1
+metrics: exec ./bin/metrics --interval 30 --tags 'app=web,env=prod'
