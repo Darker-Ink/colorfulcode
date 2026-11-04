@@ -857,10 +857,17 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         }
         if self.spec.has(features::COMMANDS) && self.command_position(start) {
             self.ctx.pos = end;
-            let kind = match self.lookup(&self.ctx.src[start..end]) {
+            let word = self.lookup(&self.ctx.src[start..end]);
+            let kind = match word {
                 _ if self.ctx.at(end) == b'=' => Kind::Variable,
                 Some(w) => w.kind,
-                None => Kind::Function,
+                None => self.pending.take().unwrap_or(Kind::Function),
+            };
+            // `function name` in command position still names a function.
+            self.pending = match word.map(|w| w.next) {
+                Some(Next::Function) => Some(Kind::Function),
+                Some(Next::Type) => Some(Kind::Type),
+                _ => None,
             };
             self.ctx.emit(start, end, kind);
             self.prev = Prev::Value;

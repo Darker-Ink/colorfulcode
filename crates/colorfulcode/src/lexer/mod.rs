@@ -217,6 +217,25 @@ impl<'s, 'o> Ctx<'s, 'o> {
         None
     }
 
+    /// Like [`Ctx::find`] but only matches that end before `end`.
+    pub fn find_in(&self, from: usize, end: usize, needle: &[u8]) -> Option<usize> {
+        let end = end.min(self.src.len());
+        if from >= end {
+            return None;
+        }
+        let hay = &self.src[from..end];
+        let first = *needle.first()?;
+        let mut i = 0;
+        while let Some(off) = hay[i..].iter().position(|&b| b == first) {
+            let at = i + off;
+            if hay[at..].starts_with(needle) {
+                return Some(from + at);
+            }
+            i = at + 1;
+        }
+        None
+    }
+
     /// Whether only spaces and tabs precede `pos` on its line.
     pub fn at_line_start(&self, pos: usize) -> bool {
         let mut i = pos;
