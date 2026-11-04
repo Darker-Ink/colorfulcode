@@ -59,6 +59,41 @@ fn yaml_sequences_anchors_and_tags() {
 }
 
 #[test]
+fn yaml_plain_scalars_continue_on_indented_lines() {
+    // A continuation line is part of the value even when it contains `: `.
+    assert_tokens(
+        "yaml",
+        "description: a long\n  text with a: colon # note\nnext: 1",
+        &[("a long", String), ("text with a: colon", String), ("# note", Comment), ("next", Property)],
+    );
+    assert_not("yaml", "description: a long\n  text with a: colon", "text with a", Property);
+    assert_tokens(
+        "yaml",
+        "list:\n  - first item\n    goes on: here\n  - name: x\n    value: y",
+        &[("first item", String), ("goes on: here", String), ("name", Property), ("value", Property)],
+    );
+    // A comment line ends the scalar.
+    assert_tokens("yaml", "key: value\n  # c\n  other: 1", &[("# c", Comment), ("other", Property)]);
+    // A value on its own line continues too.
+    assert_tokens("yaml", "key:\n  bare value\n  more: text\nnext: 1", &[("more: text", String), ("next", Property)]);
+}
+
+#[test]
+fn yaml_block_scalar_indentation_comes_from_the_enclosing_node() {
+    // `|` on its own line belongs to `key`, so text indented past `key` is content.
+    assert_tokens(
+        "yaml",
+        "key:\n  |\n text\nnext: 1",
+        &[("key", Property), ("|", Operator), ("text", String), ("next", Property)],
+    );
+    assert_tokens(
+        "yaml",
+        "top:\n  - |\n    block\n  - k: >\n      folded\n    v: 2",
+        &[("block", String), ("k", Property), ("folded", String), ("v", Property)],
+    );
+}
+
+#[test]
 fn yaml_block_scalars() {
     let code = "script: |\n  echo \"# not a comment\"\n\n  exit: 1\nafter: true\nfold: >-\n    a\n    b\n";
     assert_tokens(
@@ -245,6 +280,39 @@ fn sql_features() {
 }
 
 #[test]
+fn sql_from_inside_functions_is_not_a_table() {
+    let code = "SELECT EXTRACT(YEAR FROM created_at), TRIM(BOTH ' ' FROM name), a IS DISTINCT FROM b FROM orders";
+    assert_tokens("sql", code, &[("FROM", Keyword), ("FROM", Keyword), ("orders", Type)]);
+    assert_not("sql", code, "created_at", Type);
+    assert_not("sql", code, "name", Type);
+    assert_not("sql", code, "b", Type);
+    assert_tokens("sql", "SELECT EXTRACT(EPOCH FROM now())", &[("now", Builtin)]);
+    // A table function after FROM stays a call.
+    assert_tokens("postgres", "SELECT * FROM generate_series(1, 3) g", &[("generate_series", Function)]);
+    // Column lists are not calls.
+    assert_not("sql", "INSERT INTO s.users (a, b) VALUES (1, 2)", "users", Function);
+}
+
+#[test]
+fn sql_strings_and_casts() {
+    // Backslashes escape in E strings; a plain string may end in a backslash.
+    assert_tokens(
+        "postgres",
+        "SELECT E'a\\nb\\'c'",
+        &[("E'a", String), ("\\n", Escape), ("\\'", Escape), ("c'", String)],
+    );
+    assert_tokens("postgres", "SELECT 'C:\\', 'x'", &[("'C:\\'", String), ("'x'", String)]);
+    assert_tokens("mysql", "SELECT 'it\\'s'", &[("\\'", Escape), ("s'", String)]);
+    assert_tokens("postgres", "SELECT X'1F'", &[("X'1F'", String)]);
+    // The target of a `::` cast is a type; `:name` is a parameter.
+    assert_tokens(
+        "postgres",
+        "SELECT x::regclass, y::date FROM t WHERE id = :id",
+        &[("::", Operator), ("regclass", Type), ("date", Type), (":id", Variable)],
+    );
+}
+
+#[test]
 fn graphql_fields_and_types() {
     assert_tokens(
         "graphql",
@@ -282,6 +350,31 @@ fn diff_lines() {
             ("+new", Inserted),
             ("--- removed dashes", Deleted),
         ],
+    );
+}
+
+#[test]
+fn diff_hunks_track_line_counts() {
+    // Inside a hunk, `---` and `+++` lines are content.
+    let code = "--- a/x.sql\n+++ b/x.sql\n@@ -1,3 +1,3 @@\n select 1;\n--- old comment\n+++ new comment\n end\n--- a/y\n+++ b/y\n";
+    assert_tokens(
+        "diff",
+        code,
+        &[
+            ("--- a/x.sql", Heading),
+            ("+++ b/x.sql", Heading),
+            ("@@ -1,3 +1,3 @@", Meta),
+            ("--- old comment", Deleted),
+            ("+++ new comment", Inserted),
+            ("--- a/y", Heading),
+            ("+++ b/y", Heading),
+        ],
+    );
+    // A count of zero and the default count of one.
+    assert_tokens(
+        "diff",
+        "@@ -5 +4,0 @@\n-gone\n--- a/z\n+++ b/z\n",
+        &[("-gone", Deleted), ("--- a/z", Heading), ("+++ b/z", Heading)],
     );
 }
 
@@ -349,6 +442,41 @@ fn prisma_models() {
             ("posts", Property),
             ("@@map", Meta),
         ],
+    );
+}
+
+#[test]
+fn keys_without_letter_hooks() {
+    // Protobuf: enum values and option message keys.
+    assert_tokens(
+        "proto",
+        "enum S { S_OK = 0; }\noption (google.api.http) = { get: \"/v1\" };",
+        &[("S_OK", Property), ("get", Property)],
+    );
+    // HCL: meta-arguments that are also in a word list, and keys inside inline objects.
+    assert_tokens(
+        "hcl",
+        "  provider = aws.west\n  count = 2\n  tags = { Name = \"x\", env = 1 }",
+        &[("provider", Property), ("count", Property), ("Name", Property), ("env", Property)],
+    );
+    assert_not("hcl", "x = a == b", "a", Property);
+    // DOT: spaced attributes.
+    assert_tokens(
+        "dot",
+        "graph { rankdir = LR; a [shape = box] }",
+        &[("rankdir", Attribute), ("shape", Attribute), ("box", String)],
+    );
+    // SPARQL: prefixes that are keywords, dashed prefixes, blank nodes and the empty prefix.
+    assert_tokens(
+        "sparql",
+        "SELECT * { _:b0 data:p my-ns:q . :alice ?p ?o }",
+        &[("_:b0", Variable), ("data:", Type), ("p", Property), ("my-ns:", Type), (":", Type), ("alice", Property)],
+    );
+    // GraphQL: `type:` is a field, fields in selection sets are properties.
+    assert_tokens(
+        "graphql",
+        "type User { type: String }\nquery { user(id: 1) { name } }",
+        &[("User", Type), ("type", Property), ("user", Function), ("id", Property), ("name", Property)],
     );
 }
 
@@ -504,6 +632,27 @@ fn mermaid_diagrams() {
 }
 
 #[test]
+fn mermaid_node_ids() {
+    assert_tokens(
+        "mermaid",
+        "flowchart LR\n  A[Start] -->|go| B\n  B ==> C((End))\n  C -.-> D",
+        &[("A", Variable), ("-->", Operator), ("B", Variable), ("B", Variable), ("C", Variable), ("D", Variable)],
+    );
+    assert_tokens(
+        "mermaid",
+        "sequenceDiagram\n  Alice->>+John: Hello\n  John-->>-Alice: Hi",
+        &[("Alice", Variable), ("John", Variable), ("Hello", String), ("John", Variable), ("Alice", Variable)],
+    );
+    assert_tokens(
+        "mermaid",
+        "classDiagram\n  Animal <|-- Duck",
+        &[("Animal", Variable), ("<|--", Operator), ("Duck", Variable)],
+    );
+    // Style properties with dashes are not links.
+    assert_not("mermaid", "classDef warn stroke-width:2px", "width", Variable);
+}
+
+#[test]
 fn plantuml_diagrams() {
     assert_tokens(
         "plantuml",
@@ -534,13 +683,32 @@ fn log_levels_and_timestamps() {
             ("\"q\"", String),
             ("https://x.io/a?b=1", Link),
             ("WARN", Constant),
-            ("info", Inserted),
             ("DEBUG", Comment),
             ("INFO", Inserted),
         ],
     );
     assert_not("log", "it's fine, it failed", "fine", Comment);
     assert_not("log", "it's fine, it failed", "failed", Deleted);
+}
+
+#[test]
+fn log_lowercase_levels_need_a_level_position() {
+    // Before the message, delimited, or as a logfmt value.
+    assert_tokens("log", "2024-01-01 10:00:00 info started", &[("info", Inserted)]);
+    assert_tokens("log", "ts=1 lvl=debug msg=x", &[("debug", Comment)]);
+    assert_tokens("log", "starting up [warning] low disk", &[("warning", Constant)]);
+    assert_tokens("log", "Error: something failed", &[("Error", Deleted)]);
+    // Inside the message they are plain words.
+    assert_not("log", "server started, see docs for more info", "info", Inserted);
+    assert_not("log", "could not read the trace output", "trace", Comment);
+    assert_not("log", "An Error occurred", "Error", Type);
+    // glog and klog put the level letter before the date.
+    assert_tokens(
+        "log",
+        "E0115 10:35:00.000000 4321 controller.go:114] error syncing",
+        &[("E0115", Deleted), ("10:35:00.000000", Number)],
+    );
+    assert_not("log", "E0115 10:35:00.000000 4321 controller.go:114] error syncing", "error", Deleted);
 }
 
 #[test]

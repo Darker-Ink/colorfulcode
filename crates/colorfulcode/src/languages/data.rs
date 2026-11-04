@@ -33,6 +33,13 @@ fn line_comment(ctx: &mut Ctx) {
     ctx.emit_from(start, Kind::Comment);
 }
 
+/// Changes the kind of everything from `start` to the cursor.
+fn retag(ctx: &mut Ctx, start: usize, kind: Kind) {
+    let end = ctx.pos;
+    ctx.truncate_to(start);
+    ctx.emit(start, end, kind);
+}
+
 /// Lexes a string whose opening quote is at the cursor.
 fn quoted(ctx: &mut Ctx, kind: Kind, flags: u8) {
     let q = ctx.peek();
@@ -130,11 +137,6 @@ fn trim_end(src: &[u8], start: usize, mut end: usize) -> usize {
         end -= 1;
     }
     end
-}
-
-/// Column of `pos` within its line.
-fn column(ctx: &Ctx, pos: usize) -> usize {
-    pos - ctx.src[..pos].iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1)
 }
 
 /// Whether `s` is a number: decimal with `_` separators, fraction and
@@ -263,20 +265,67 @@ pub static YAML: Definition = Definition::new("yaml", "YAML", Engine::Custom(yam
     .extensions(&["yaml", "yml"])
     .filenames(&[".clang-format", ".clang-tidy", ".gemrc"]);
 
+/// The columns of the open block nodes (mapping keys and `- ` entries),
+/// innermost last, and the start of the current line.
+struct YamlIndents {
+    cols: [usize; 32],
+    len: usize,
+    line: usize,
+}
+
+impl YamlIndents {
+    /// Closes the nodes a line starting at `col` ends and returns the column
+    /// of the node that contains it, or -1 at the top level.
+    fn parent(&mut self, col: usize) -> isize {
+        while self.len > 0 && self.cols[self.len - 1] >= col {
+            self.len -= 1;
+        }
+        if self.len == 0 {
+            -1
+        } else {
+            self.cols[self.len - 1] as isize
+        }
+    }
+
+    fn push(&mut self, col: usize) {
+        if self.len == self.cols.len() {
+            self.len -= 1;
+        }
+        self.cols[self.len] = col;
+        self.len += 1;
+    }
+}
+
 fn yaml(ctx: &mut Ctx) {
+    let mut indents = YamlIndents { cols: [0; 32], len: 0, line: 0 };
+    // Lines indented past this column continue a multi-line plain scalar.
+    let mut plain: Option<usize> = None;
     while !ctx.done() {
         let start = ctx.pos;
         let at = ctx.skip_spaces_from(start);
         ctx.pos = at;
-        if at == start && yaml_document_marker(ctx, at) {
+        indents.line = start;
+        if matches!(ctx.peek(), b'\n' | b'\r' | b'#') {
+            // Blank and comment lines leave the indentation alone; a comment ends a plain scalar.
+            plain = plain.filter(|_| ctx.peek() != b'#');
+        } else if at == start && yaml_document_marker(ctx, at) {
             ctx.token(3, Kind::Punctuation);
             ctx.skip_spaces();
-            yaml_block(ctx, -1);
+            indents.len = 0;
+            plain = yaml_block(ctx, &mut indents, -1);
         } else if at == start && ctx.peek() == b'%' {
             ctx.skip_line();
             ctx.emit_from(at, Kind::Meta);
+            plain = None;
+        } else if plain.is_some_and(|col| at - start > col) {
+            // `key: a long\n  text with a: colon` is still the value.
+            let end = yaml_plain_end(ctx, at, false);
+            ctx.emit(at, end, Kind::String);
+            ctx.pos = end;
+            plain = plain.filter(|_| matches!(ctx.next_non_space(end), 0 | b'\n' | b'\r'));
         } else {
-            yaml_block(ctx, column(ctx, at) as isize - 1);
+            let parent = indents.parent(at - start);
+            plain = yaml_block(ctx, &mut indents, parent);
         }
         yaml_rest(ctx);
         if ctx.peek() == b'\n' {
@@ -302,29 +351,35 @@ fn yaml_rest(ctx: &mut Ctx) {
 
 /// Block indicators (`- `, `? `, `: `) followed by a node. `parent` is the
 /// column of the enclosing node, which a block scalar must be indented past.
-fn yaml_block(ctx: &mut Ctx, mut parent: isize) {
-    while matches!(ctx.peek(), b'-' | b'?' | b':') && is_blank(ctx.peek_at(1)) {
-        let b = ctx.peek();
-        parent = column(ctx, ctx.pos) as isize;
+/// Returns that column when the line ends in a plain scalar that the next
+/// lines may continue.
+fn yaml_block(ctx: &mut Ctx, indents: &mut YamlIndents, mut parent: isize) -> Option<usize> {
+    let mut value = false;
+    while !value && matches!(ctx.peek(), b'-' | b'?' | b':') && is_blank(ctx.peek_at(1)) {
+        let col = ctx.pos - indents.line;
+        value = ctx.peek() == b':';
+        if !value {
+            indents.push(col);
+        }
+        parent = col as isize;
         ctx.token(1, Kind::Punctuation);
         ctx.skip_spaces();
-        if b == b':' {
-            yaml_value(ctx, parent);
-            return;
+    }
+    if !value {
+        yaml_properties(ctx);
+        let start = ctx.pos;
+        if let Some((key_end, colon)) = yaml_key(ctx, start, false) {
+            let col = start - indents.line;
+            indents.push(col);
+            parent = col as isize;
+            ctx.emit(start, key_end, Kind::Property);
+            ctx.pos = colon;
+            ctx.token(1, Kind::Punctuation);
+            ctx.skip_spaces();
         }
     }
-    yaml_properties(ctx);
-    let start = ctx.pos;
-    if let Some((key_end, colon)) = yaml_key(ctx, start, false) {
-        let key_col = column(ctx, start) as isize;
-        ctx.emit(start, key_end, Kind::Property);
-        ctx.pos = colon;
-        ctx.token(1, Kind::Punctuation);
-        ctx.skip_spaces();
-        yaml_value(ctx, key_col);
-    } else {
-        yaml_value(ctx, parent);
-    }
+    let plain = yaml_value(ctx, parent);
+    (plain && parent >= 0 && matches!(ctx.next_non_space(ctx.pos), 0 | b'\n' | b'\r')).then_some(parent as usize)
 }
 
 /// If a mapping key starts at `from`, returns the end of the key and the
@@ -404,7 +459,8 @@ fn yaml_name(ctx: &mut Ctx, kind: Kind) {
     ctx.emit(start, end, kind);
 }
 
-fn yaml_value(ctx: &mut Ctx, parent: isize) {
+/// A node after its key or indicator. Returns true for a plain scalar.
+fn yaml_value(ctx: &mut Ctx, parent: isize) -> bool {
     yaml_properties(ctx);
     match ctx.peek() {
         b'|' | b'>' if yaml_block_scalar(ctx, parent) => {}
@@ -418,8 +474,10 @@ fn yaml_value(ctx: &mut Ctx, parent: isize) {
             let end = yaml_plain_end(ctx, start, false);
             ctx.emit(start, end, yaml_scalar_kind(&ctx.src[start..end]));
             ctx.pos = end;
+            return true;
         }
     }
+    false
 }
 
 /// End of a plain scalar starting at `from` (trailing spaces excluded).
@@ -531,9 +589,7 @@ fn yaml_flow(ctx: &mut Ctx) {
             q @ (b'"' | b'\'') => {
                 quoted(ctx, Kind::String, if q == b'"' { ESC | MULTI } else { DOUBLED | MULTI });
                 if ctx.next_non_space(ctx.pos) == b':' {
-                    let end = ctx.pos;
-                    ctx.truncate_to(start);
-                    ctx.emit(start, end, Kind::Property);
+                    retag(ctx, start, Kind::Property);
                 }
             }
             b'&' | b'!' => yaml_properties(ctx),
@@ -942,8 +998,7 @@ fn columns(ctx: &mut Ctx, mut sep: u8) {
                 while !ctx.done() && !matches!(ctx.peek(), b'\n' | b'\r') && ctx.peek() != sep {
                     ctx.pos += 1;
                 }
-                ctx.truncate_to(start);
-                ctx.emit_from(start, COLUMN_KINDS[column % COLUMN_KINDS.len()]);
+                retag(ctx, start, COLUMN_KINDS[column % COLUMN_KINDS.len()]);
             }
         }
     }
@@ -952,11 +1007,14 @@ fn columns(ctx: &mut Ctx, mut sep: u8) {
 // SQL
 
 /// Dollar quoted bodies (`$$ ... $$`, `$fn$ ... $fn$`), parameters (`$1`,
-/// `:name`), `::` casts and bracketed identifiers (`[Order Details]`).
+/// `:name`), `::` casts, bracketed identifiers (`[Order Details]`), plain
+/// strings and `FROM`.
 fn sql_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     match ctx.peek() {
+        b'\'' => sql_string(lx),
+        b'f' | b'F' => sql_from(lx),
         b'$' => {
             let next = ctx.peek_at(1);
             if next.is_ascii_digit() {
@@ -987,7 +1045,7 @@ fn sql_hook(lx: &mut Lexer) -> bool {
             if start > 0 && (is_ident(ctx.src[start - 1]) || matches!(ctx.src[start - 1], b')' | b']')) {
                 return false;
             }
-            let line_end = ctx.line_end(start);
+            let line_end = ctx.line_end_within(start, 256);
             let Some(close) = ctx.src[start..line_end].iter().position(|&b| b == b']') else {
                 return false;
             };
@@ -1001,8 +1059,13 @@ fn sql_hook(lx: &mut Lexer) -> bool {
             true
         }
         b':' if ctx.peek_at(1) == b':' => {
+            // `x::name`: the cast target is a type.
             ctx.token(2, Kind::Operator);
+            let typed = is_ident_start(ctx.peek());
             lx.mark_operator();
+            if typed {
+                lx.set_pending(Some(Kind::Type));
+            }
             true
         }
         b':' if is_ident_start(ctx.peek_at(1)) && (start == 0 || !is_ident(ctx.src[start - 1])) => {
@@ -1016,6 +1079,100 @@ fn sql_hook(lx: &mut Lexer) -> bool {
     }
 }
 
+/// A standard string, where `''` is a quote. Backslash escapes count too, as
+/// in MySQL, except a backslash right before the closing quote (`'C:\'`).
+fn sql_string(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let src = ctx.src;
+    let start = ctx.pos;
+    let mut seg = start;
+    let mut i = start + 1;
+    loop {
+        match src[i..].iter().position(|&b| b == b'\'' || b == b'\\') {
+            Some(p) => i += p,
+            None => {
+                i = src.len();
+                break;
+            }
+        }
+        if src[i] == b'\'' {
+            if ctx.at(i + 1) == b'\'' {
+                i += 2;
+                continue;
+            }
+            i += 1;
+            break;
+        }
+        if ctx.at(i + 1) == b'\'' && matches!(ctx.at(i + 2), 0 | b' ' | b'\t' | b'\r' | b'\n' | b',' | b')' | b';') {
+            i += 1;
+            continue;
+        }
+        ctx.emit(seg, i, Kind::String);
+        ctx.pos = i;
+        escape_len(ctx);
+        ctx.emit_from(i, Kind::Escape);
+        seg = ctx.pos;
+        i = ctx.pos;
+    }
+    ctx.pos = i;
+    ctx.emit(seg, i, Kind::String);
+    lx.mark_value();
+    true
+}
+
+/// Functions whose arguments use `FROM` without naming a table.
+const SQL_FROM_FUNCTIONS: &[&[u8]] = &[b"extract", b"trim", b"substring", b"overlay"];
+
+/// `FROM` names a table unless it is part of `EXTRACT(x FROM y)` and similar
+/// calls or `IS DISTINCT FROM`. A table function (`FROM unnest(...)`) stays a call.
+fn sql_from(lx: &mut Lexer) -> bool {
+    let ctx = &*lx.ctx;
+    let start = ctx.pos;
+    let end = start + 4;
+    if !ctx.starts_with_ignore_case(b"from") || is_ident(ctx.at(end)) || (start > 0 && ctx.src[start - 1] == b'.') {
+        return false;
+    }
+    let word_before = |pos: usize| {
+        let mut e = pos;
+        while e > 0 && ctx.src[e - 1].is_ascii_whitespace() {
+            e -= 1;
+        }
+        let mut s = e;
+        while s > 0 && is_ident(ctx.src[s - 1]) {
+            s -= 1;
+        }
+        &ctx.src[s..e]
+    };
+    let mut table = !word_before(start).eq_ignore_ascii_case(b"distinct");
+    // Look back for an unclosed `(` in the same statement.
+    let mut depth = 0u32;
+    let mut i = start;
+    while table && i > start.saturating_sub(256) {
+        i -= 1;
+        match ctx.src[i] {
+            b')' => depth += 1,
+            b'(' if depth == 0 => {
+                let name = word_before(i);
+                table = !SQL_FROM_FUNCTIONS.iter().any(|f| name.eq_ignore_ascii_case(f));
+                break;
+            }
+            b'(' => depth -= 1,
+            b';' => break,
+            _ => {}
+        }
+    }
+    let mut next = end;
+    while ctx.at(next).is_ascii_whitespace() {
+        next += 1;
+    }
+    let pending = table && is_ident_start(ctx.at(next)) && ctx.at(lx.scan_ident(next)) != b'(';
+    lx.ctx.pos = end;
+    lx.ctx.emit(start, end, Kind::Keyword);
+    lx.mark_operator();
+    lx.set_pending(pending.then_some(Kind::Type));
+    true
+}
+
 static SQL_SPEC: Spec = Spec {
     line_comments: &["--"],
     block_comments: &[("/*", "*/")],
@@ -1024,15 +1181,16 @@ static SQL_SPEC: Spec = Spec {
         Str::quoted("\"").raw().doubled().kind(Kind::Property),
         Str::quoted("`").raw().doubled().kind(Kind::Property),
     ],
+    // Plain `'...'` strings go through `sql_string`; `E'...'` has every backslash escape.
     string_prefixes: &[
         Prefix::plain(b'E'),
         Prefix::plain(b'e'),
         Prefix::plain(b'N'),
         Prefix::plain(b'n'),
-        Prefix::plain(b'X'),
-        Prefix::plain(b'x'),
-        Prefix::plain(b'B'),
-        Prefix::plain(b'b'),
+        Prefix::raw(b'X'),
+        Prefix::raw(b'x'),
+        Prefix::raw(b'B'),
+        Prefix::raw(b'b'),
     ],
     keywords: &[
         "add", "after", "all", "alter", "analyze", "and", "any", "as", "asc", "begin", "between", "by", "call",
@@ -1061,14 +1219,15 @@ static SQL_SPEC: Spec = Spec {
         "string_agg", "array_agg", "substring", "sum", "trim", "upper",
     ],
     constants: &["null", "true", "false", "unknown"],
-    // Table names follow these words.
-    type_keywords: &["table", "into", "from", "join", "update", "exists"],
+    // Table names follow these words (and `FROM`, see `sql_from`).
+    type_keywords: &["table", "into", "join", "update", "exists"],
     sigils: &[(b'@', Kind::Variable)],
     operators: "+-*/%=&|^!<>~?:",
     case_insensitive: true,
-    features: CALLS | MEMBERS,
+    // Tight calls keep `INSERT INTO t (a, b)` and `VALUES (1)` from looking like calls.
+    features: TIGHT_CALLS | MEMBERS,
     hook: Some(sql_hook),
-    hook_chars: "$[:",
+    hook_chars: "$[:'fF",
     ..Spec::DEFAULT
 };
 
@@ -1084,23 +1243,22 @@ const GRAPHQL_KEYWORDS: &[&str] = &[
 
 const GRAPHQL_TYPE_KEYWORDS: &[&str] = &["type", "interface", "union", "enum", "input", "scalar"];
 
-/// Lowercase names are fields (or arguments) unless they are keywords or
-/// calls. A name followed by `:` is always a field, even `type:`, and so is
-/// `type` in a selection set, where no type name follows it.
+/// Lowercase names in selection sets are fields unless they are keywords or
+/// calls; so is `type` when no type name follows it. Names followed by `:`
+/// are left to IDENT_KEYS.
 fn graphql_hook(lx: &mut Lexer) -> bool {
     let start = lx.ctx.pos;
     let end = lx.scan_ident(start);
-    let word = &lx.ctx.src[start..end];
     let next = lx.ctx.next_non_space(end);
-    if next != b':' {
-        let reserved = |list: &[&str]| list.iter().any(|w| w.as_bytes() == word);
-        if next == b'('
-            || reserved(GRAPHQL_KEYWORDS)
-            || (reserved(GRAPHQL_TYPE_KEYWORDS) && next.is_ascii_uppercase())
-            || reserved(&["true", "false", "null"])
-        {
-            return false;
-        }
+    if matches!(next, b':' | b'(') {
+        return false;
+    }
+    let word = &lx.ctx.src[start..end];
+    match lx.word_kind(word) {
+        None => {}
+        Some(Kind::Keyword)
+            if !next.is_ascii_uppercase() && GRAPHQL_TYPE_KEYWORDS.iter().any(|w| w.as_bytes() == word) => {}
+        Some(_) => return false,
     }
     lx.ctx.pos = end;
     lx.ctx.emit(start, end, Kind::Property);
@@ -1117,7 +1275,7 @@ static GRAPHQL_SPEC: Spec = Spec {
     type_keywords: GRAPHQL_TYPE_KEYWORDS,
     sigils: &[(b'$', Kind::Variable)],
     operators: "=!|&",
-    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | ANNOTATIONS,
+    features: CALLS | CAPITALIZED_TYPES | UPPER_CONSTANTS | ANNOTATIONS | IDENT_KEYS,
     hook: Some(graphql_hook),
     hook_chars: "abcdefghijklmnopqrstuvwxyz_",
     ..Spec::DEFAULT
@@ -1139,13 +1297,70 @@ const DIFF_META: &[&[u8]] = &[
     b"rename to", b"copy from", b"copy to", b"Binary files", b"Only in",
 ];
 
+/// The old and new line counts of a hunk header: `@@ -1,3 +1,4 @@` gives
+/// `(3, 4)`, and a missing count is 1.
+fn diff_hunk_counts(line: &[u8]) -> Option<(usize, usize)> {
+    fn range(s: &[u8], sign: u8) -> Option<(usize, &[u8])> {
+        let s = s.strip_prefix(&[sign])?;
+        let digits = s.iter().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        let s = &s[digits..];
+        let Some(s) = s.strip_prefix(b",") else {
+            return Some((1, s));
+        };
+        let digits = s.iter().take_while(|b| b.is_ascii_digit()).count();
+        let count = std::str::from_utf8(&s[..digits]).ok()?.parse().ok()?;
+        Some((count, &s[digits..]))
+    }
+    let (old, rest) = range(line.strip_prefix(b"@@ ")?, b'-')?;
+    let (new, rest) = range(rest.strip_prefix(b" ")?, b'+')?;
+    rest.starts_with(b" @@").then_some((old, new))
+}
+
 fn diff(ctx: &mut Ctx) {
+    // Lines still to come in the current hunk, on the old and the new side.
+    // Inside a hunk `--- x` and `+++ y` are content, not file headers.
+    let (mut old, mut new) = (0usize, 0usize);
     while !ctx.done() {
         let start = ctx.pos;
         let end = ctx.line_end(start);
         let line = &ctx.src[start..end];
+        let first = line.first().copied().unwrap_or(0);
+        if old > 0 || new > 0 {
+            let kind = match first {
+                b'+' => {
+                    new = new.saturating_sub(1);
+                    Some(Kind::Inserted)
+                }
+                b'-' => {
+                    old = old.saturating_sub(1);
+                    Some(Kind::Deleted)
+                }
+                b' ' | b'\r' | 0 => {
+                    old = old.saturating_sub(1);
+                    new = new.saturating_sub(1);
+                    Some(Kind::Text)
+                }
+                b'\\' => Some(Kind::Comment),
+                // The counts were wrong: back to headers.
+                _ => {
+                    (old, new) = (0, 0);
+                    None
+                }
+            };
+            if let Some(kind) = kind {
+                ctx.emit(start, end, kind);
+                ctx.pos = end;
+                if ctx.peek() == b'\n' {
+                    ctx.pos += 1;
+                }
+                continue;
+            }
+        }
         let next = if end < ctx.len() { &ctx.src[end + 1..ctx.line_end(end + 1)] } else { &[][..] };
-        let kind = match line.first().copied().unwrap_or(0) {
+        let kind = match first {
             // File headers come in pairs: `--- a/file` then `+++ b/file`.
             b'-' if line.starts_with(b"--- ") && next.starts_with(b"+++ ") => {
                 ctx.emit(start, end, Kind::Heading);
@@ -1162,8 +1377,9 @@ fn diff(ctx: &mut Ctx) {
             b'!' => Kind::Constant,
             b'@' if line.starts_with(b"@@") => {
                 // `@@ -1,3 +1,4 @@ fn context`: the trailing context stays text.
-                let close = ctx.find(start + 2, b"@@").filter(|&p| p < end).map_or(end, |p| p + 2);
+                let close = ctx.find_in(start + 2, end, b"@@").map_or(end, |p| p + 2);
                 ctx.emit(start, close, Kind::Meta);
+                (old, new) = diff_hunk_counts(line).unwrap_or((0, 0));
                 ctx.pos = end;
                 if ctx.peek() == b'\n' {
                     ctx.pos += 1;
@@ -1187,22 +1403,6 @@ fn diff(ctx: &mut Ctx) {
 
 // Protocol Buffers
 
-/// `name =` is a field, option or enum value name.
-fn assignment_key_hook(lx: &mut Lexer) -> bool {
-    let start = lx.ctx.pos;
-    let end = lx.scan_ident(start);
-    let eq = lx.ctx.skip_spaces_from(end);
-    if lx.ctx.at(eq) != b'='
-        || matches!(lx.ctx.at(eq + 1), b'=' | b'>' | b'~')
-        || matches!(&lx.ctx.src[start..end], b"syntax" | b"edition")
-    {
-        return false;
-    }
-    lx.ctx.pos = end;
-    lx.ctx.emit(start, end, Kind::Property);
-    true
-}
-
 static PROTOBUF_SPEC: Spec = Spec {
     line_comments: &["//"],
     block_comments: &[("/*", "*/")],
@@ -1219,9 +1419,8 @@ static PROTOBUF_SPEC: Spec = Spec {
     function_keywords: &["rpc"],
     type_keywords: &["message", "enum", "service", "extend"],
     operators: "=-+<>",
-    features: CAPITALIZED_TYPES | UPPER_CONSTANTS,
-    hook: Some(assignment_key_hook),
-    hook_chars: "abcdefghijklmnopqrstuvwxyz_",
+    // Fields, enum values and options: `name = 1`; option message keys: `get: "/v1"`.
+    features: CAPITALIZED_TYPES | UPPER_CONSTANTS | ASSIGN_KEYS | IDENT_KEYS,
     ..Spec::DEFAULT
 };
 
@@ -1253,20 +1452,25 @@ pub static THRIFT: Definition =
 
 // HCL and Terraform
 
-/// Attribute and object keys (`name =`), nested block types at the start of
-/// a line (`lifecycle {`), and heredocs (`<<EOF`, `<<-EOF`).
+/// Words that start a line: attributes (`count = 2`, even when the word is
+/// in a word list) and nested block types (`lifecycle {`). Also heredocs
+/// (`<<EOF`, `<<-EOF`). Other `name =` keys come from ASSIGN_KEYS.
 fn hcl_hook(lx: &mut Lexer) -> bool {
     let start = lx.ctx.pos;
     if lx.ctx.peek() != b'<' {
-        if assignment_key_hook(lx) {
-            return true;
-        }
-        let end = lx.scan_ident(start);
-        if !lx.ctx.at_line_start(start) || !matches!(lx.ctx.next_non_space(end), b'{' | b'"') {
+        if !lx.ctx.at_line_start(start) {
             return false;
         }
+        let end = lx.scan_ident(start);
+        let after = lx.ctx.skip_spaces_from(end);
+        let kind = match lx.ctx.at(after) {
+            b'=' if !matches!(lx.ctx.at(after + 1), b'=' | b'>') => Kind::Property,
+            b'{' | b'"' => Kind::Keyword,
+            _ => return false,
+        };
         lx.ctx.pos = end;
-        lx.ctx.emit(start, end, Kind::Keyword);
+        lx.ctx.emit(start, end, kind);
+        lx.set_pending(None);
         return true;
     }
     let ctx = &mut *lx.ctx;
@@ -1320,7 +1524,7 @@ static HCL_SPEC: Spec = Spec {
     constants: &["true", "false", "null"],
     ident_chars: "-",
     operators: "+-*/%=&|!<>?:",
-    features: CALLS | MEMBERS,
+    features: CALLS | MEMBERS | ASSIGN_KEYS,
     hook: Some(hcl_hook),
     hook_chars: "<abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
     ..Spec::DEFAULT
@@ -1344,7 +1548,7 @@ fn prisma_hook(lx: &mut Lexer) -> bool {
     if end == lx.ctx.skip_spaces_from(end) || !is_ident_start(next) {
         return false;
     }
-    if matches!(&lx.ctx.src[start..end], b"model" | b"enum" | b"type" | b"view" | b"datasource" | b"generator") {
+    if lx.word_kind(&lx.ctx.src[start..end]).is_some() {
         return false;
     }
     lx.ctx.pos = end;
@@ -1441,7 +1645,7 @@ fn http_message(ctx: &mut Ctx, line_end: usize) {
         };
         ctx.pos = target;
         let mut target_end = trim_end(ctx.src, target, line_end);
-        if let Some(v) = ctx.find(target, b" HTTP/").filter(|&v| v < line_end) {
+        if let Some(v) = ctx.find_in(target, line_end, b" HTTP/") {
             target_end = v;
         }
         http_text(ctx, target_end, Kind::String);
@@ -1525,13 +1729,15 @@ fn http_text(ctx: &mut Ctx, end: usize, kind: Kind) {
     let mut seg = ctx.pos;
     while ctx.pos < end {
         if ctx.starts_with(b"{{") {
-            if let Some(close) = ctx.find(ctx.pos + 2, b"}}").filter(|&c| c < end) {
-                ctx.emit_from(seg, kind);
-                ctx.emit(ctx.pos, close + 2, Kind::Variable);
-                ctx.pos = close + 2;
-                seg = ctx.pos;
-                continue;
-            }
+            // Without a `}}` here no later `{{` can have one either.
+            let Some(close) = ctx.find_in(ctx.pos + 2, end, b"}}") else {
+                break;
+            };
+            ctx.emit_from(seg, kind);
+            ctx.emit(ctx.pos, close + 2, Kind::Variable);
+            ctx.pos = close + 2;
+            seg = ctx.pos;
+            continue;
         }
         ctx.pos += 1;
     }
@@ -1540,9 +1746,10 @@ fn http_text(ctx: &mut Ctx, end: usize, kind: Kind) {
     ctx.pos = end;
 }
 
-/// Retags the identifier that ends at `end` as `kind`. Returns false if there
-/// is no identifier there.
-fn retag_word(lx: &mut Lexer, end: usize, kind: Kind) -> bool {
+/// Retags the identifier that ends at the cursor as `kind`. Returns false if
+/// there is no identifier there.
+fn retag_word(lx: &mut Lexer, kind: Kind) -> bool {
+    let end = lx.ctx.pos;
     let mut start = end;
     while start > 0 && lx.is_ident_byte(lx.ctx.src[start - 1]) {
         start -= 1;
@@ -1550,8 +1757,7 @@ fn retag_word(lx: &mut Lexer, end: usize, kind: Kind) -> bool {
     if start == end || lx.ctx.src[start].is_ascii_digit() {
         return false;
     }
-    lx.ctx.truncate_to(start);
-    lx.ctx.emit(start, end, kind);
+    lx.retag(start, kind);
     true
 }
 
@@ -1563,7 +1769,7 @@ fn cypher_hook(lx: &mut Lexer) -> bool {
     let next = lx.ctx.peek_at(1);
     if is_ident_start(next) || next == b'`' {
         let end = if next == b'`' {
-            let line_end = lx.ctx.line_end(start);
+            let line_end = lx.ctx.line_end_within(start, 1024).max(start + 2);
             lx.ctx.src[start + 2..line_end].iter().position(|&b| b == b'`').map_or(line_end, |i| start + 2 + i + 1)
         } else {
             lx.scan_ident(start + 1)
@@ -1574,7 +1780,7 @@ fn cypher_hook(lx: &mut Lexer) -> bool {
         lx.mark_value();
         return true;
     }
-    if matches!(next, b' ' | b'\t') && retag_word(lx, start, Kind::Property) {
+    if matches!(next, b' ' | b'\t') && retag_word(lx, Kind::Property) {
         lx.ctx.token(1, Kind::Punctuation);
         lx.mark_operator();
         return true;
@@ -1621,7 +1827,7 @@ fn sparql_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
     if ctx.peek() == b'<' {
-        let line_end = ctx.line_end(start);
+        let line_end = ctx.line_end_within(start, 2048);
         let mut i = start + 1;
         while i < line_end && !matches!(ctx.src[i], b'>' | b' ' | b'\t' | b'<' | b'"' | b'{' | b'}' | b'\r') {
             i += 1;
@@ -1634,24 +1840,31 @@ fn sparql_hook(lx: &mut Lexer) -> bool {
         lx.mark_value();
         return true;
     }
-    let name = |ctx: &Ctx, mut i: usize| {
-        while is_ident(ctx.at(i)) || ctx.at(i) == b'-' || (ctx.at(i) == b'.' && is_ident(ctx.at(i + 1))) {
-            i += 1;
-        }
-        i
-    };
-    let colon = name(ctx, start);
-    if ctx.at(colon) != b':' {
+    // The prefix before the colon was already lexed as words: take it back.
+    let mut prefix = start;
+    while prefix > 0 && (is_ident(ctx.src[prefix - 1]) || ctx.src[prefix - 1] == b'-') {
+        prefix -= 1;
+    }
+    while prefix < start && !is_ident_start(ctx.src[prefix]) {
+        prefix += 1;
+    }
+    if prefix > 0 && matches!(ctx.src[prefix - 1], b'?' | b'$' | b'@') {
         return false;
     }
-    let end = name(ctx, colon + 1);
-    if &ctx.src[start..colon] == b"_" {
-        ctx.emit(start, end, Kind::Variable);
-    } else {
-        ctx.emit(start, colon + 1, Kind::Type);
-        ctx.emit(colon + 1, end, Kind::Property);
+    let mut end = start + 1;
+    while is_ident(ctx.at(end)) || ctx.at(end) == b'-' || (ctx.at(end) == b'.' && is_ident(ctx.at(end + 1))) {
+        end += 1;
     }
-    ctx.pos = end;
+    if &ctx.src[prefix..start] == b"_" {
+        lx.retag(prefix, Kind::Variable);
+        lx.ctx.pos = end;
+        lx.ctx.emit(start, end, Kind::Variable);
+    } else {
+        lx.retag(prefix, Kind::Type);
+        lx.ctx.token(1, Kind::Type);
+        lx.ctx.emit(start + 1, end, Kind::Property);
+        lx.ctx.pos = end;
+    }
     lx.mark_value();
     true
 }
@@ -1677,7 +1890,7 @@ static SPARQL_SPEC: Spec = Spec {
     case_insensitive: true,
     features: CALLS,
     hook: Some(sparql_hook),
-    hook_chars: "<:_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    hook_chars: "<:",
     ..Spec::DEFAULT
 };
 
@@ -1713,7 +1926,7 @@ fn kdl(ctx: &mut Ctx) {
             b'/' if ctx.peek_at(1) == b'-' => kdl_slashdash(ctx, node),
             b'(' => {
                 // Type annotation: `(u8)`, `(date)"2024-01-01"`.
-                let line_end = ctx.line_end(start);
+                let line_end = ctx.line_end_within(start, 1024);
                 let close = ctx.src[start..line_end].iter().position(|&b| b == b')').map(|i| start + i);
                 ctx.emit(start, start + 1, Kind::Punctuation);
                 ctx.emit(start + 1, close.unwrap_or(line_end), Kind::Type);
@@ -1818,9 +2031,7 @@ fn kdl_retag(ctx: &mut Ctx, start: usize, node: bool) {
     } else {
         return;
     };
-    let end = ctx.pos;
-    ctx.truncate_to(start);
-    ctx.emit(start, end, kind);
+    retag(ctx, start, kind);
 }
 
 /// `/-` comments out the next node, argument, property or children block.
@@ -1928,7 +2139,7 @@ fn jsonnet_hook(lx: &mut Lexer) -> bool {
                 end += 1;
             }
             let colons = end - start - plus;
-            if colons == 0 || (colons == 1 && plus == 0) || !retag_word(lx, start, Kind::Property) {
+            if colons == 0 || (colons == 1 && plus == 0) || !retag_word(lx, Kind::Property) {
                 return false;
             }
             lx.ctx.pos = end;
@@ -1998,21 +2209,27 @@ fn dot_hook(lx: &mut Lexer) -> bool {
             true
         }
         _ => {
-            let end = lx.scan_ident(start);
-            let eq = lx.ctx.skip_spaces_from(end);
-            if lx.ctx.at(eq) != b'=' {
-                return false;
+            // `shape = box`: the word before `=` is the attribute, a bare word after it the value.
+            let mut key_end = start;
+            while key_end > 0 && matches!(lx.ctx.src[key_end - 1], b' ' | b'\t') {
+                key_end -= 1;
             }
-            lx.ctx.emit(start, end, Kind::Attribute);
-            lx.ctx.emit(eq, eq + 1, Kind::Operator);
-            let value = lx.ctx.skip_spaces_from(eq + 1);
+            let mut key = key_end;
+            while key > 0 && is_ident(lx.ctx.src[key - 1]) {
+                key -= 1;
+            }
+            if key < key_end && is_ident_start(lx.ctx.src[key]) {
+                lx.ctx.truncate_to(key);
+                lx.ctx.emit(key, key_end, Kind::Attribute);
+            }
+            lx.ctx.token(1, Kind::Operator);
+            let value = lx.ctx.skip_spaces_from(start + 1);
             if is_ident_start(lx.ctx.at(value)) {
                 let value_end = lx.scan_ident(value);
                 lx.ctx.emit(value, value_end, Kind::String);
                 lx.ctx.pos = value_end;
                 lx.mark_value();
             } else {
-                lx.ctx.pos = eq + 1;
                 lx.mark_operator();
             }
             true
@@ -2029,7 +2246,7 @@ static DOT_SPEC: Spec = Spec {
     operators: "-=>",
     case_insensitive: true,
     hook: Some(dot_hook),
-    hook_chars: "#<abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
+    hook_chars: "#<=",
     ..Spec::DEFAULT
 };
 
@@ -2041,15 +2258,19 @@ pub static DOT: Definition =
 /// Directives (`%%{init: ...}%%`), node shapes (`A[label]`, `B((circle))`),
 /// edge labels (`-->|label|`) and message text after `: `.
 fn mermaid_hook(lx: &mut Lexer) -> bool {
+    if matches!(lx.ctx.peek(), b'-' | b'=' | b'.' | b'<' | b'~' | b'*') {
+        return mermaid_link(lx);
+    }
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
-    let line_end = ctx.line_end(start);
+    // Labels longer than this are left to the generic rules.
+    let line_end = ctx.line_end_within(start, 512);
     match ctx.peek() {
         b'%' => {
             if !ctx.starts_with(b"%%{") {
                 return false;
             }
-            let end = ctx.find(start, b"}%%").map_or(line_end, |p| p + 3);
+            let end = ctx.find_in(start, start + 1024, b"}%%").map_or(line_end, |p| p + 3);
             ctx.pos = end;
             ctx.emit(start, end, Kind::Meta);
         }
@@ -2082,6 +2303,12 @@ fn mermaid_hook(lx: &mut Lexer) -> bool {
             while end < line_end && end - close < 3 && matches!(ctx.src[end], b']' | b')' | b'}') {
                 end += 1;
             }
+            // The word before the shape is a node id.
+            let mut id = start;
+            while id > 0 && is_ident(ctx.src[id - 1]) {
+                id -= 1;
+            }
+            retag(ctx, id, Kind::Variable);
             ctx.emit(start, open_end, Kind::Punctuation);
             ctx.emit(open_end, text_end, Kind::String);
             ctx.emit(text_end, end, Kind::Punctuation);
@@ -2117,6 +2344,61 @@ fn mermaid_hook(lx: &mut Lexer) -> bool {
     true
 }
 
+/// A link or message arrow (`-->`, `-.->`, `==>`, `->>`, `<|--`, `~~~`): the
+/// words on both sides are node ids.
+fn mermaid_link(lx: &mut Lexer) -> bool {
+    let ctx = &mut *lx.ctx;
+    let start = ctx.pos;
+    let mut end = start;
+    let mut line = false;
+    loop {
+        match ctx.at(end) {
+            b'-' | b'=' | b'~' => line = true,
+            b'.' | b'<' | b'>' | b'*' => {}
+            // `<|--` and `--|>` in class diagrams.
+            b'|' if ctx.at(end.wrapping_sub(1)) == b'<' || ctx.at(end + 1) == b'>' => {}
+            _ => break,
+        }
+        end += 1;
+    }
+    let dotted = ctx.starts_with(b"..");
+    if end - start < 2 || !(line || dotted) {
+        return false;
+    }
+    // `--x` and `--o` end in a cross or a circle.
+    if matches!(ctx.at(end), b'x' | b'o') && !is_ident(ctx.at(end + 1)) {
+        end += 1;
+    }
+    let mut word_end = start;
+    while word_end > 0 && matches!(ctx.src[word_end - 1], b' ' | b'\t') {
+        word_end -= 1;
+    }
+    let mut word = word_end;
+    while word > 0 && is_ident(ctx.src[word - 1]) {
+        word -= 1;
+    }
+    if word < word_end && (word == 0 || is_blank(ctx.src[word - 1]) || ctx.src[word - 1] == b';') {
+        ctx.truncate_to(word);
+        ctx.emit(word, word_end, Kind::Variable);
+    }
+    ctx.pos = end;
+    ctx.emit(start, end, Kind::Operator);
+    // The target follows, perhaps after a `|label|` or an activation `+`.
+    let mut next = ctx.skip_spaces_from(end);
+    if ctx.at(next) == b'|' {
+        let line_end = ctx.line_end_within(next + 1, 512);
+        next = ctx.src[next + 1..line_end].iter().position(|&b| b == b'|').map_or(next, |i| next + i + 2);
+        next = ctx.skip_spaces_from(next);
+    }
+    if matches!(ctx.at(next), b'+' | b'-') {
+        next += 1;
+    }
+    let target = is_ident_start(ctx.at(next));
+    lx.mark_operator();
+    lx.set_pending(target.then_some(Kind::Variable));
+    true
+}
+
 static MERMAID_SPEC: Spec = Spec {
     line_comments: &["%%"],
     strings: &[Str::quoted("\"").raw()],
@@ -2132,7 +2414,7 @@ static MERMAID_SPEC: Spec = Spec {
     constants: &["true", "false"],
     operators: "-=.<>~&*+",
     hook: Some(mermaid_hook),
-    hook_chars: "%[({>|:",
+    hook_chars: "%[({>|:-=.<~*",
     ..Spec::DEFAULT
 };
 
@@ -2147,7 +2429,6 @@ pub static MERMAID: Definition = Definition::new("mermaid", "Mermaid", Engine::G
 fn plantuml_hook(lx: &mut Lexer) -> bool {
     let ctx = &mut *lx.ctx;
     let start = ctx.pos;
-    let line_end = ctx.line_end(start);
     match ctx.peek() {
         b'#' => {
             let mut end = start + 1;
@@ -2162,24 +2443,29 @@ fn plantuml_hook(lx: &mut Lexer) -> bool {
         }
         b'<' if !ctx.starts_with(b"<<") => {
             // Standard library includes: `!include <C4/C4_Container>`.
-            let line_start = ctx.skip_spaces_from(start - column(ctx, start));
-            let close = ctx.src[start..line_end].iter().position(|&b| b == b'>');
-            match close {
-                Some(c) if ctx.starts_with_at(line_start, b"!include") => {
-                    ctx.pos = start + c + 1;
-                    ctx.emit(start, ctx.pos, Kind::String);
-                }
-                _ => return false,
+            let mut before = start;
+            while before > 0 && matches!(ctx.src[before - 1], b' ' | b'\t') {
+                before -= 1;
             }
+            if !ctx.src[..before].ends_with(b"!include") {
+                return false;
+            }
+            let line_end = ctx.line_end_within(start, 1024);
+            let Some(close) = ctx.src[start..line_end].iter().position(|&b| b == b'>') else {
+                return false;
+            };
+            ctx.pos = start + close + 1;
+            ctx.emit(start, ctx.pos, Kind::String);
         }
         b'<' => {
-            let Some(close) = ctx.find(start + 2, b">>").filter(|&c| c < line_end) else {
+            let Some(close) = ctx.find_in(start + 2, ctx.line_end_within(start, 256), b">>") else {
                 return false;
             };
             ctx.pos = close + 2;
             ctx.emit(start, ctx.pos, Kind::Meta);
         }
         b':' if ctx.at_line_start(start) => {
+            let line_end = ctx.line_end_within(start, 4096);
             let close =
                 ctx.src[start..line_end].iter().position(|&b| matches!(b, b';' | b'|' | b'<')).map(|i| start + i);
             let text_end = close.unwrap_or(line_end);
@@ -2191,6 +2477,7 @@ fn plantuml_hook(lx: &mut Lexer) -> bool {
             }
         }
         b':' if matches!(ctx.peek_at(1), b' ' | b'\t') => {
+            let line_end = ctx.line_end_within(start, 4096);
             let text = ctx.skip_spaces_from(start + 1);
             ctx.emit(start, start + 1, Kind::Punctuation);
             ctx.emit(text, trim_end(ctx.src, text, line_end), Kind::String);
@@ -2258,16 +2545,36 @@ fn log_level(word: &[u8]) -> Option<Kind> {
     (word == upper || word[1..].iter().all(u8::is_ascii_lowercase)).then_some(kind)
 }
 
+/// The level letter of a glog or klog line: `E0115 10:35:00.000000 ...`.
+fn klog_level(ctx: &Ctx, start: usize, word: &[u8]) -> Option<Kind> {
+    if word.len() != 5 || !word[1..].iter().all(u8::is_ascii_digit) || (start > 0 && ctx.src[start - 1] != b'\n') {
+        return None;
+    }
+    match word[0] {
+        b'E' | b'F' => Some(Kind::Deleted),
+        b'W' => Some(Kind::Constant),
+        b'I' => Some(Kind::Inserted),
+        _ => None,
+    }
+}
+
 fn log(ctx: &mut Ctx) {
     const MONTHS: &[&[u8]] =
         &[b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec"];
+    // A plain word came earlier on this line, so the message has started:
+    // `info` in "see docs for more info" is not a level.
+    let mut prose = false;
     while !ctx.done() {
         let start = ctx.pos;
         let b = ctx.peek();
         match b {
+            b'\n' => {
+                ctx.pos += 1;
+                prose = false;
+            }
             b'"' => quoted(ctx, Kind::String, ESC),
             b'\'' if start == 0 || !ctx.src[start - 1].is_ascii_alphanumeric() => {
-                let line_end = ctx.line_end(start);
+                let line_end = ctx.line_end_within(start, 1024);
                 let close = ctx.src[start + 1..line_end].iter().position(|&b| b == b'\'').map(|i| start + 1 + i);
                 match close {
                     Some(c) if !ctx.at(c + 1).is_ascii_alphanumeric() => {
@@ -2320,7 +2627,15 @@ fn log(ctx: &mut Ctx) {
                         }
                     }
                     Kind::Number
-                } else if let Some(kind) = log_level(word) {
+                } else if let Some(kind) = log_level(word).filter(|_| {
+                    // Lowercase levels count before the message or when delimited: `[info]`, `level=info`, `info:`.
+                    !prose
+                        || word.iter().all(|b| !b.is_ascii_lowercase())
+                        || (start > 0 && matches!(ctx.src[start - 1], b'[' | b'<' | b'(' | b'|' | b'='))
+                        || matches!(ctx.at(end), b']' | b'>' | b')' | b'|' | b':')
+                }) {
+                    kind
+                } else if let Some(kind) = klog_level(ctx, start, word) {
                     kind
                 } else if let Some(kind) = word.iter().rposition(|&b| b == b'.').and_then(|dot| {
                     log_level(&word[dot + 1..])
@@ -2339,13 +2654,15 @@ fn log(ctx: &mut Ctx) {
                     Kind::Property
                 } else if matches!(word, b"true" | b"false" | b"null" | b"nil" | b"None" | b"undefined") {
                     Kind::Constant
-                } else if (word.ends_with(b"Exception") || word.ends_with(b"Error"))
+                } else if ((word.len() > 9 && word.ends_with(b"Exception"))
+                    || (word.len() > 5 && word.ends_with(b"Error")))
                     && word.rsplit(|&b| b == b'.').next().is_some_and(|w| w.first().is_some_and(u8::is_ascii_uppercase))
                 {
                     Kind::Type
                 } else {
                     Kind::Text
                 };
+                prose |= kind == Kind::Text;
                 ctx.pos = end;
                 ctx.emit(start, end, kind);
             }
@@ -2398,7 +2715,7 @@ fn regex_body(ctx: &mut Ctx, end: usize) {
                     class = None;
                 }
                 b'[' if ctx.peek_at(1) == b':' => {
-                    let close = ctx.find(start + 2, b":]").filter(|&c| c < end).map_or(start + 1, |c| c + 2);
+                    let close = ctx.find_in(start + 2, end.min(start + 16), b":]").map_or(start + 1, |c| c + 2);
                     ctx.pos = close;
                     ctx.emit_from(start, Kind::Builtin);
                 }
