@@ -1,7 +1,7 @@
 {
   "name": "colorfulcode-repo",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": ["packages/*", "examples/react"],
   "scripts": {
     "build": "npm run build -w colorfulcode",
     "test": "npm test -w colorfulcode"
