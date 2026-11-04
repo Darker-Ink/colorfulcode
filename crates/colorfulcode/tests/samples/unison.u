@@ -1,0 +1,41 @@
+-- A small Unison program with abilities.
+use base
+
+{{ Computes the factorial of a natural number. }}
+factorial : Nat -> Nat
+factorial n = if n <= 1 then 1 else n * factorial (n - 1)
+
+structural type Shape = Circle Float | Rect Float Float
+
+area : Shape -> Float
+area = cases
+  Circle r -> 3.14159 * r * r
+  Rect w h -> w * h
+
+unique ability Counter where
+  bump : Nat -> ()
+
+{- Handlers interpret abilities.
+   {- nested -} -}
+countAll : '{Counter} a -> (a, Nat)
+countAll thunk =
+  go total = cases
+    { a } -> (a, total)
+    { bump n -> k } -> handle k () with go (total + n)
+  handle !thunk with go 0
+
+greet : Text -> Text
+greet name = "Hello, " ++ name ++ "!\n"
+
+initial : Char
+initial = ?U
+
+main : '{IO, Exception} ()
+main = do
+  printLine (greet "world")
+  printLine (Nat.toText (factorial 10))
+  match area (Rect 2.0 3.5) with
+    a | a > 5.0 -> printLine "big"
+    _ -> printLine """raw \n text"""
+
+> factorial 5
