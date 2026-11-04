@@ -915,7 +915,7 @@ fn tag_close(src: &[u8], from: usize, close: &[u8]) -> Option<usize> {
     let mut i = from;
     while i < src.len() {
         let b = src[i];
-        if src[i..].starts_with(close) {
+        if close.first() == Some(&b) && src[i..].starts_with(close) {
             return Some(i);
         }
         if matches!(b, b'"' | b'\'' | b'`') {
@@ -980,10 +980,8 @@ fn helper(ctx: &mut Ctx, spec: &'static Spec, inner: usize, end: usize) {
         let e = name_end(ctx, p, b"-").min(end);
         let word = &src[p..e];
         let args = ctx.skip_spaces_from(e);
-        let known = [spec.keywords, spec.builtins, spec.constants, spec.variables]
-            .iter()
-            .any(|list| list.iter().any(|w| w.as_bytes() == word));
-        if !known && (b == b'>' || (call && args > e && args < end)) {
+        let helper = b == b'>' || (call && args > e && args < end);
+        if helper && Lexer::new(ctx, spec).word_kind(word).is_none() {
             ctx.emit(p, e, Kind::Function);
             p = e;
         }
