@@ -12,3 +12,10 @@ version = "0.1.0"
 dependencies = [
  "colorfulcode",
 ]
+
+[[package]]
+name = "colorfulcode-ffi"
+version = "0.1.0"
+dependencies = [
+ "colorfulcode",
+]
