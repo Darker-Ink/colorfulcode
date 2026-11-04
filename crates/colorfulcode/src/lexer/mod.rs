@@ -83,6 +83,11 @@ impl<'s, 'o> Ctx<'s, 'o> {
         rest.len() >= s.len() && rest[..s.len()].eq_ignore_ascii_case(s)
     }
 
+    /// The last emitted token.
+    pub fn last_token(&self) -> Option<Token> {
+        self.out.last().copied()
+    }
+
     /// Kind of the last emitted token.
     pub fn last_kind(&self) -> Option<Kind> {
         self.out.last().map(|t| t.kind)

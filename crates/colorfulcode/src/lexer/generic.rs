@@ -914,6 +914,14 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         if !self.spec.has(features::ARROW_FUNCTIONS) || self.prev == Prev::Value {
             return false;
         }
+        // `if (`, `for (` and friends are by far the most common `(` after a
+        // keyword, and never start an arrow function.
+        if let Some(t) = self.ctx.last_token() {
+            let text = &self.ctx.src[t.range()];
+            if t.kind == Kind::Keyword && matches!(text, b"if" | b"while" | b"for" | b"switch" | b"catch" | b"with") {
+                return false;
+            }
+        }
         let Some(close) = paren_close_within(self.ctx.src, open, PARAMS_MAX) else {
             return false;
         };
@@ -945,6 +953,15 @@ impl<'c, 's, 'o> Lexer<'c, 's, 'o> {
         }
         while i > 0 && matches!(src[i - 1], b' ' | b'\t') {
             i -= 1;
+        }
+        // A definition starts a line or follows a type or modifier (`int f(`,
+        // `Foo* f(`, `int[] f(`). Calls after `=`, `(`, `,` or an operator
+        // never are, and skipping them avoids the lookahead for most calls.
+        if i > 0
+            && !matches!(src[i - 1], b'\n' | b'*' | b'&' | b'>' | b']' | b'}' | b';')
+            && !self.is_ident_byte(src[i - 1])
+        {
+            return false;
         }
         let word_end = i;
         while i > 0 && src[i - 1].is_ascii_alphabetic() {
