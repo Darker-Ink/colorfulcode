@@ -154,7 +154,7 @@ With `theme: false` each token gets the class `cc-<kind>`, for example `cc-keywo
 ## Themes
 
 <p align="center">
-  <img src="assets/themes.png" alt="All built in themes" width="860">
+  <img src="assets/themes.webp" alt="All built in themes" width="860">
 </p>
 
 `colorful` (default), `colorful-light`, `github-dark`, `github-light`, `dracula`, `nord`, `one-dark`, `monokai`, `catppuccin-mocha`, `catppuccin-latte`, `tokyo-night`, `gruvbox-dark`, `solarized-dark`, `solarized-light`.
@@ -172,7 +172,7 @@ import { rosePine } from "colorfulcode/themes";
 `rose-pine`, `rose-pine-moon`, `rose-pine-dawn`, `ayu-dark`, `ayu-mirage`, `ayu-light`, `night-owl`, `light-owl`, `palenight`, `material-darker`, `synthwave-84`, `kanagawa`, `everforest-dark`, `everforest-light`, `vitesse-dark`, `vitesse-light`, `poimandres`, `github-dark-dimmed`, `one-light`, `gruvbox-light`, `catppuccin-frappe`, `catppuccin-macchiato`, `tokyo-night-storm`, `tokyo-night-light`, `monokai-pro`, `horizon`, `panda`, `cobalt2`. Each export is the camelCase name, for example `tokyoNightStorm`.
 
 <p align="center">
-  <img src="assets/more-themes.png" alt="The themes in colorfulcode/themes" width="860">
+  <img src="assets/more-themes.webp" alt="The themes in colorfulcode/themes" width="860">
 </p>
 
 ## Custom themes
