@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>colorfulcode without a framework</title>
+    <link rel="stylesheet" href="../../packages/colorfulcode/dist/styles.css" />
+    <link rel="stylesheet" href="../../packages/colorfulcode/dist/themes/github-light.css" />
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; }
+      pre, code { font-family: ui-monospace, monospace; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <h1>Plain HTML</h1>
+    <p>Write ordinary <code>&lt;pre&gt;&lt;code class="language-…"&gt;</code> blocks, then call <code>highlightAll</code>.</p>
+
+    <pre><code class="language-python">def greet(name: str) -> str:
+    return f"Hello, {name}!"  # f-strings work
+</code></pre>
+
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Hello from Go")
+}
+</code></pre>
+
+    <script type="module">
+      import { highlightAll } from "../../packages/colorfulcode/dist/index.js";
+
+      // `theme: false` emits class names, styled by the theme stylesheet above.
+      highlightAll({ theme: false });
+    </script>
+  </body>
+</html>
