@@ -1,0 +1,6 @@
+id,name,email,age,city,joined,score,notes
+1,Alice Smith,alice@example.com,34,Berlin,2021-03-04,88.5,"Likes ""quotes"""
+2,Bob Jones,bob@example.com,28,Paris,2020-11-12,92.0,
+3,"Carol, Jr.",carol@example.com,41,"New
+York",2019-07-01,75.25,"multi, field"
+4,Dan,dan@example.com,,Tokyo,2022-01-30,60,plain
