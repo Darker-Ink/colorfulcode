@@ -9,7 +9,9 @@ Print files with syntax highlighting.
 
 Usage: colorfulcode [options] [file]...
 
-With no file, or when file is -, read standard input.
+With no file, or when file is -, read standard input. The language comes from
+the file name, a shebang, or else a guess from the content (-l text turns
+highlighting off).
 
 Options:
   -l, --language <name>  Force a language instead of detecting it

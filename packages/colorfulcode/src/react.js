@@ -1,5 +1,5 @@
 import { createElement, useMemo } from "react";
-import { getLanguage, getTheme, highlight, tokenizeLines } from "./index.js";
+import { detectLanguage, getLanguage, getTheme, highlight, tokenizeLines } from "./index.js";
 
 export * from "./index.js";
 
@@ -26,7 +26,8 @@ export function useTokens(code, language) {
  *
  * The code can also be passed as a string child. With a theme (default
  * "colorful") everything is styled inline and no CSS is required. Pass
- * `theme={false}` to get class names for your own stylesheet.
+ * `theme={false}` to get class names for your own stylesheet, and
+ * `language="auto"` to guess the language from the code.
  */
 export function Code({
   code,
@@ -41,9 +42,14 @@ export function Code({
   ...rest
 }) {
   const source = code ?? (typeof children === "string" ? children : "");
-  const html = useHighlight(source, language, { theme, lineNumbers, highlightLines });
+  // Guess once here, so the highlighting and `data-language` agree.
+  const resolved = useMemo(
+    () => (language === "auto" ? (detectLanguage({ code: source, guess: true }) ?? "text") : language),
+    [source, language],
+  );
+  const html = useHighlight(source, resolved, { theme, lineNumbers, highlightLines });
   const colors = theme === false ? undefined : getTheme(theme);
-  const lang = getLanguage(language);
+  const lang = getLanguage(resolved);
   const classes = className ? `cc ${className}` : "cc";
   const themed = colors ? { background: colors.background, color: colors.foreground } : undefined;
   if (inline) {

@@ -67,6 +67,21 @@ test("metadata lookups", () => {
   assert.match(themeCss("nord", ".code"), /^\.code\{background:#2e3440/);
 });
 
+test("detection from content is opt-in", () => {
+  const code = "def greet(name):\n    if not name:\n        return None\n    print(f'hi {name}')\n";
+  // By default only paths, shebangs and doctypes count.
+  assert.equal(detectLanguage({ code }), undefined);
+  assert.equal(detectLanguage({ code, guess: true }), "python");
+  assert.equal(detectLanguage({ path: "a.rb", code, guess: true }), "ruby");
+  assert.equal(detectLanguage({ code: "just a sentence", guess: true }), undefined);
+  // Unknown names never guess, "auto" does.
+  assert.equal(highlight(code, "nope", { pre: false, theme: false }), highlight(code, "text", { pre: false, theme: false }));
+  assert.equal(highlight(code, "auto", { theme: false }), highlight(code, "python", { theme: false }));
+  assert.deepEqual(tokenize(code, "auto"), tokenize(code, "python"));
+  assert.deepEqual(tokenizeLines("SELECT 1 FROM t;", "auto"), tokenizeLines("SELECT 1 FROM t;", "sql"));
+  assert.equal(highlight("hello", "auto", { pre: false }), "hello");
+});
+
 test("large input", () => {
   const code = "let x = `a ${b}`; // c\n".repeat(20000);
   const html = highlight(code, "javascript");

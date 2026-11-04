@@ -41,6 +41,11 @@ fn languages() {
         assert!(cc_language_name(cc_language_count()).is_null());
         let script = "#!/bin/sh\necho hi\n";
         assert_eq!(string(cc_language_id(cc_language_from_content(script.as_ptr().cast(), script.len()))), "bash");
+        let code = "package main\n\nfunc main() {\n\tfmt.Println(\"hi\")\n}\n";
+        assert_eq!(string(cc_language_id(cc_language_detect(code.as_ptr().cast(), code.len()))), "go");
+        assert_eq!(cc_language_detect(c"hello".as_ptr(), 5), -1);
+        assert_eq!(cc_language_detect(ptr::null(), 0), -1);
+        assert_eq!(cc_language_detect(c"\xff\xfe".as_ptr(), 2), -1);
     }
 }
 

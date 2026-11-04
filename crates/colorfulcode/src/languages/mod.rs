@@ -182,6 +182,35 @@ impl Language {
         None
     }
 
+    /// Guesses the language of `code` from its content alone. Opt-in:
+    /// highlighting never calls it. Tries [`Language::from_content`] first,
+    /// then scores the first 4 KB against every language, which takes well
+    /// under a millisecond (the word tables are built on the first call).
+    /// Returns `None` when no language is a convincing match.
+    ///
+    /// ```
+    /// use colorfulcode::Language;
+    /// let code = "def greet(name):\n    if not name:\n        return None\n    print(f\"hi {name}\")\n";
+    /// assert_eq!(Language::detect(code).unwrap().id(), "python");
+    /// assert_eq!(Language::detect("just a sentence"), None);
+    /// ```
+    pub fn detect(code: &str) -> Option<Language> {
+        crate::detect::detect(code, Language::all())
+    }
+
+    /// Like [`Language::detect`], but only picks from `candidates`, for
+    /// callers that know the likely set.
+    ///
+    /// ```
+    /// use colorfulcode::Language;
+    /// let web = ["javascript", "typescript"].map(|id| Language::find(id).unwrap());
+    /// let code = "const total: number = items.length;";
+    /// assert_eq!(Language::detect_among(code, &web).unwrap().id(), "typescript");
+    /// ```
+    pub fn detect_among(code: &str, candidates: &[Language]) -> Option<Language> {
+        crate::detect::detect(code, candidates)
+    }
+
     /// The table driven spec behind this language, if any.
     pub(crate) fn spec(self) -> Option<&'static Spec> {
         match self.0.engine {

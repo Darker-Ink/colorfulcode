@@ -20,6 +20,7 @@
 //! [`Theme`] provides colors for native renderers.
 
 pub mod ansi;
+mod detect;
 pub mod html;
 mod kind;
 mod languages;

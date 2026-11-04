@@ -163,6 +163,21 @@ pub unsafe extern "C" fn cc_language_from_content(code: *const c_char, len: usiz
     language_index(unsafe { source(code, len) }.and_then(Language::from_content))
 }
 
+/// Guesses the language from the content alone, scoring the first few KB
+/// against every language. Opt-in: highlighting never calls it. Returns -1
+/// when unsure or for invalid UTF-8.
+///
+/// # Safety
+///
+/// `code` must be null or point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn cc_language_detect(code: *const c_char, len: usize) -> i32 {
+    let Some(code) = (unsafe { source(code, len) }) else {
+        return -1;
+    };
+    guard(-1, || language_index(Language::detect(code)))
+}
+
 /// Canonical id of a language, for example `"rust"`. NULL if out of range.
 #[no_mangle]
 pub extern "C" fn cc_language_id(language: i32) -> *const c_char {
