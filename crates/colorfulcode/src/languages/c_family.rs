@@ -1363,7 +1363,51 @@ pub static ZIG: Definition = Definition::new("zig", "Zig", Engine::Generic(&ZIG_
 // D
 
 /// Token strings `q{...}` and delimited strings `q"(...)"`, `q"/.../"`, `q"EOS ... EOS"`.
+/// `enum NAME = value;` and `enum int NAME = value;` declare constants, while
+/// `enum Name { ... }` declares a type (left to the generic rules).
+fn d_manifest_constant(lx: &mut Lexer) -> bool {
+    let src = lx.ctx.src;
+    let start = lx.ctx.pos;
+    if !src[start..].starts_with(b"enum") || is_ident(lx.ctx.at(start + 4)) || (start > 0 && is_ident(src[start - 1])) {
+        return false;
+    }
+    // Collect the words up to the first `=`, `{`, `;` or `:` on this line.
+    let limit = lx.ctx.line_end_within(start, 256);
+    let mut words = [(0usize, 0usize); 4];
+    let mut count = 0;
+    let mut i = start + 4;
+    while i < limit {
+        let b = src[i];
+        if is_ident(b) {
+            let e = lx.scan_ident(i);
+            if count == words.len() {
+                return false;
+            }
+            words[count] = (i, e);
+            count += 1;
+            i = e;
+        } else if matches!(b, b' ' | b'\t') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if count == 0 || lx.ctx.at(i) != b'=' || lx.ctx.at(i + 1) == b'=' {
+        return false;
+    }
+    lx.ctx.emit(start, start + 4, Kind::Keyword);
+    for (n, &(s, e)) in words[..count].iter().enumerate() {
+        let kind = if n + 1 == count { Kind::Constant } else { lx.word_kind(&src[s..e]).unwrap_or(Kind::Type) };
+        lx.ctx.emit(s, e, kind);
+    }
+    lx.ctx.pos = words[count - 1].1;
+    true
+}
+
 fn d_hook(lx: &mut Lexer) -> bool {
+    if lx.ctx.peek() == b'e' {
+        return d_manifest_constant(lx);
+    }
     let ctx = &*lx.ctx;
     let start = ctx.pos;
     let src = ctx.src;
@@ -1456,7 +1500,7 @@ static D_SPEC: Spec = Spec {
     type_keywords: &["class", "struct", "interface", "enum", "union", "template"],
     features: CALLS | CONSTRUCTORS | CAPITALIZED_TYPES | UPPER_CONSTANTS | MEMBERS | ANNOTATIONS | BANG_MACROS,
     hook: Some(d_hook),
-    hook_chars: "q",
+    hook_chars: "qe",
     ..Spec::DEFAULT
 };
 

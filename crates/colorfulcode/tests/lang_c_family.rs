@@ -417,3 +417,10 @@ fn hare_and_carbon() {
         &[("Area", Function), ("self", Variable), ("Self", Type), ("f64", Type)],
     );
 }
+
+#[test]
+fn d_manifest_constants() {
+    assert_tokens("d", "enum answer = 42;", &[("enum", Keyword), ("answer", Constant), ("42", Number)]);
+    assert_tokens("d", "enum int limit = 10;", &[("int", Type), ("limit", Constant)]);
+    assert_tokens("d", "enum Color { red, green }", &[("enum", Keyword), ("Color", Type)]);
+}
