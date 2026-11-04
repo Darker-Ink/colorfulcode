@@ -1,5 +1,5 @@
 import { Code, defineTheme, getTheme, highlight, listLanguages, listThemes } from "colorfulcode/react";
-import { useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { Editor } from "./Editor.jsx";
 import { samples } from "./samples.js";
 
@@ -30,24 +30,17 @@ export function Example({ source }) {
   return <Code code={source} language="tsx" theme="tokyo-night" lineNumbers highlightLines={[4]} />;
 }`;
 
-/** Times a full highlight of the current document, repeated for a stable number. */
-function useSpeed(code, language) {
-  return useMemo(() => {
-    const runs = 20;
-    const start = performance.now();
-    for (let i = 0; i < runs; i++) highlight(code, language);
-    const ms = (performance.now() - start) / runs;
-    const mbps = code.length / 1e6 / (ms / 1000);
-    return { ms, mbps };
-  }, [code, language]);
-}
-
 export default function App() {
   const [language, setLanguage] = useState("tsx");
   const [theme, setTheme] = useState("colorful");
   const [code, setCode] = useState(samples.tsx);
   const colors = getTheme(theme);
-  const speed = useSpeed(code, language);
+  const [speed, setSpeed] = useState({ ms: 0, chars: 0 });
+  // Smooth the number a little so it is readable while typing.
+  const onTiming = useCallback(
+    (ms, chars) => setSpeed((s) => ({ ms: s.chars === chars || !s.ms ? ms : s.ms * 0.7 + ms * 0.3, chars })),
+    [],
+  );
 
   const pickLanguage = (id) => {
     setLanguage(id);
@@ -87,11 +80,11 @@ export default function App() {
           </select>
         </label>
         <span className="speed">
-          {code.length.toLocaleString()} chars in <b>{speed.ms.toFixed(3)} ms</b> ({speed.mbps.toFixed(0)} MB/s)
+          {code.length.toLocaleString()} chars highlighted in <b>{speed.ms.toFixed(2)} ms</b>
         </span>
       </section>
 
-      <Editor value={code} onChange={setCode} language={language} theme={theme} colors={colors} />
+      <Editor value={code} onChange={setCode} language={language} theme={theme} colors={colors} onTiming={onTiming} />
 
       <section className="usage">
         <h2>Using it in React</h2>

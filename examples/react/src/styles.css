@@ -49,6 +49,9 @@ header { text-align: center; margin-bottom: 24px; }
   overflow: auto;
 }
 .editor pre { pointer-events: none; overflow: hidden; }
+.editor pre code { display: block; will-change: transform; }
+.editor .cc-line { display: block; }
+.editor .cc-line:empty::before { content: " "; }
 .editor textarea {
   resize: none;
   border: 0;
