@@ -4,6 +4,8 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Lets the release workflow run the full suite before publishing.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
