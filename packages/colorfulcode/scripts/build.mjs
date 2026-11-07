@@ -4,10 +4,10 @@
 // (Node, Deno, Bun, browsers, every bundler) without any configuration, and
 // so it can be instantiated synchronously.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const repo = join(root, "..", "..");
@@ -22,7 +22,13 @@ function buildWasm(features) {
   try {
     // Optional: shrink and speed up the module when binaryen is installed.
     const optimized = join(repo, "target", "colorfulcode.opt.wasm");
-    execFileSync("wasm-opt", ["-O3", "--enable-bulk-memory", "--enable-sign-ext", "--enable-nontrapping-float-to-int", "--enable-mutable-globals", wasmPath, "-o", optimized], { stdio: "ignore" });
+    // On Windows wasm-opt is a .cmd shim, which Node only runs through a shell.
+    const args = ["-O3", "--enable-bulk-memory", "--enable-sign-ext", "--enable-nontrapping-float-to-int", "--enable-mutable-globals", wasmPath, "-o", optimized];
+    if (process.platform === "win32") {
+      execSync(`wasm-opt ${args.map((a) => `"${a}"`).join(" ")}`, { stdio: "ignore" });
+    } else {
+      execFileSync("wasm-opt", args, { stdio: "ignore" });
+    }
     return readFileSync(optimized);
   } catch {
     console.warn("wasm-opt not found, using the unoptimized module");
@@ -57,7 +63,7 @@ const kib = (b) => `${(b.length / 1024).toFixed(0)} KiB`;
 console.log(`dist ready: full wasm ${kib(full)}, common wasm ${kib(common)}`);
 
 // Prebuilt theme stylesheets for the class based output.
-const { listThemes, themeCss } = await import(join(dist, "index.js"));
+const { listThemes, themeCss } = await import(pathToFileURL(join(dist, "index.js")).href);
 mkdirSync(join(dist, "css"));
 for (const { name } of listThemes()) {
   writeFileSync(join(dist, "css", `${name}.css`), themeCss(name));
