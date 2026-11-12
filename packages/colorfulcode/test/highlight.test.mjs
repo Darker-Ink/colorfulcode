@@ -52,8 +52,8 @@ test("tokens cover the input and use UTF-16 offsets", () => {
 test("tokenizeLines splits multi line tokens", () => {
   const lines = tokenizeLines("/* a\nb */\nx", "c");
   assert.equal(lines.length, 3);
-  assert.deepEqual(lines[0], [{ text: "/* a", kind: "comment" }]);
-  assert.deepEqual(lines[1], [{ text: "b */", kind: "comment" }]);
+  assert.deepEqual(lines[0], [{ text: "/* a", kind: "comment", start: 0, end: 4 }]);
+  assert.deepEqual(lines[1], [{ text: "b */", kind: "comment", start: 0, end: 4 }]);
 });
 
 test("metadata lookups", () => {

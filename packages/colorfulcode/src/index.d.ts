@@ -21,6 +21,15 @@ export interface Token {
 export interface LineToken {
   text: string;
   kind: Kind;
+  /** Offset of the token from the start of its line (UTF-16 code units). */
+  start: number;
+  end: number;
+}
+
+/** Tokens as `start, end, kind` triples; `kind` indexes into `kinds`. */
+export interface TokenRanges {
+  ranges: Uint32Array;
+  kinds: Kind[];
 }
 
 export interface LanguageInfo {
@@ -82,7 +91,12 @@ export type LanguageName = "auto" | (string & {});
 /** Highlights code and returns HTML. Unknown languages render as plain text. */
 export function highlight(code: string, language: LanguageName, options?: HighlightOptions): string;
 /** Tokens covering the whole input. */
+/** Tokens covering the whole input. Pass `{ text: false }` to skip the per token strings. */
 export function tokenize(code: string, language: LanguageName): Token[];
+export function tokenize(code: string, language: LanguageName, options: { text: false }): Omit<Token, "text">[];
+export function tokenize(code: string, language: LanguageName, options?: { text?: boolean }): Token[];
+/** The cheapest form of the tokens: a flat array with no per token objects or strings. */
+export function tokenizeRanges(code: string, language: LanguageName): TokenRanges;
 /** Tokens split into lines, without line breaks. */
 export function tokenizeLines(code: string, language: LanguageName): LineToken[][];
 export function listLanguages(): LanguageInfo[];
@@ -91,6 +105,18 @@ export function getLanguage(name: string): LanguageInfo | undefined;
 export function getTheme(name: string | ThemeDefinition): ThemeInfo | undefined;
 /** Registers a custom theme and returns its name. */
 export function defineTheme(theme: ThemeDefinition): string;
+/** Makes `alias` mean `language`, for example `registerAlias("curl", "bash")`. Case insensitive. */
+export function registerAlias(alias: string, language: string): void;
+/**
+ * Loads the module. Required before anything else with `colorfulcode/web`
+ * (pass a URL, Response, bytes or module to load it from elsewhere); a no-op
+ * that resolves at once with the other entries.
+ */
+export function init(source?: string | URL | Response | PromiseLike<Response> | BufferSource | WebAssembly.Module): Promise<void>;
+/** Whether functions can be called now without waiting for `init()`. */
+export function isReady(): boolean;
+/** Calls `listener` once the module has loaded. Returns an unsubscribe function. */
+export function subscribe(listener: () => void): () => void;
 /**
  * Guesses a language id from a file path, then from a shebang or doctype in
  * the code. Undefined when unsure.

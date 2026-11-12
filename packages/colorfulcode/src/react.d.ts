@@ -30,3 +30,10 @@ export function useHighlight(
 
 /** Memoized `tokenizeLines()`, for custom rendering. */
 export function useTokens(code: string, language: LanguageName): LineToken[][];
+
+/**
+ * Whether the module is ready. With `colorfulcode/web` it starts loading the
+ * module and re-renders once it has loaded; elsewhere it is always true. The
+ * other hooks and `<Code>` use it, and show plain text until then.
+ */
+export function useReady(): boolean;
