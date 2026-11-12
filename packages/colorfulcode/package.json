@@ -1,8 +1,11 @@
 {
   "name": "colorfulcode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Fast syntax highlighting for a lot of languages, powered by Rust and WebAssembly",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Darker-Ink/colorfulcode.git",
@@ -39,12 +42,22 @@
       "types": "./dist/common-react.d.ts",
       "default": "./dist/common-react.js"
     },
+    "./web": {
+      "types": "./dist/web.d.ts",
+      "default": "./dist/web.js"
+    },
+    "./web/react": {
+      "types": "./dist/web-react.d.ts",
+      "default": "./dist/web-react.js"
+    },
     "./themes": {
       "types": "./dist/themes.d.ts",
       "default": "./dist/themes.js"
     },
     "./styles.css": "./dist/styles.css",
-    "./css/*": "./dist/css/*"
+    "./css/*": "./dist/css/*",
+    "./colorfulcode.wasm": "./dist/colorfulcode.wasm",
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",

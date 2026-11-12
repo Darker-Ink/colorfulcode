@@ -19,7 +19,7 @@
 
 - **Fast.** Around 210 MB/s natively and 35 to 45 MB/s from JavaScript including HTML output. That is 11 to 27 times faster than Prism and highlight.js and over 100 times faster than Shiki ([benchmarks](#benchmarks)).
 - **Lots of languages.** 200 languages, including embedded ones: scripts and styles in HTML, fenced code in Markdown, Vue and Svelte components, and TSX with generic arrow functions.
-- **Small for what it does.** All 200 languages are 349 KiB gzipped, and the 55 most used ones are 169 KiB (`colorfulcode/common`). No dependencies.
+- **Small for what it does.** The 56 most used languages are a 156 KiB download with `colorfulcode/web` (gzipped), and you can [choose](#smaller-build) between that and every language. No dependencies.
 - **Zero setup.** Synchronous, so it works in SSR, React Server Components, Node, Deno, Bun and every bundler without configuration.
 - **Easy to render anywhere.** The output is a flat list of `(start, end, kind)` tokens plus theme colors, so native UIs can colorize text in a few lines.
 
@@ -54,7 +54,7 @@ Everything is styled inline, so no CSS is needed. Pass `theme={false}` to get cl
 | `highlightLines` | `number[]` | | One based lines to highlight. |
 | `inline` | `boolean` | `false` | Render a `<code>` for inline snippets instead of a `<pre>` block. |
 
-Two hooks are exported as well: `useHighlight(code, language, options)` returns memoized HTML, and `useTokens(code, language)` returns memoized lines of `{ text, kind }` for rendering with your own components.
+Hooks are exported as well: `useHighlight(code, language, options)` returns memoized HTML, `useTokens(code, language)` returns memoized lines of `{ text, kind, start, end }` for rendering with your own components, and `useReady()` tells you whether the module has loaded (always true except with [`colorfulcode/web/react`](#in-the-browser)).
 
 ## JavaScript
 
@@ -71,17 +71,35 @@ const tokens = tokenize("const answer = 42;", "js");
 | Function | Returns |
 | --- | --- |
 | `highlight(code, language, options?)` | HTML. Options: `theme` (name, theme object or `false`), `pre` (wrap in `<pre><code>`, default `true`), `lineNumbers`, `lines`, `highlightLines`. |
-| `tokenize(code, language)` | `{ start, end, kind, text }[]` covering the whole input. Offsets are string indices. |
-| `tokenizeLines(code, language)` | `{ text, kind }[][]`, one array per line. |
+| `tokenize(code, language, options?)` | `{ start, end, kind, text }[]` covering the whole input. Offsets are string indices. Pass `{ text: false }` to skip the strings. |
+| `tokenizeRanges(code, language)` | `{ ranges, kinds }`: a `Uint32Array` of `start, end, kind` triples, the cheapest form for editors and big inputs. |
+| `tokenizeLines(code, language)` | `{ text, kind, start, end }[][]`, one array per line, offsets relative to the line. |
 | `highlightAll(options?, root?)` | Highlights every `<code class="language-xyz">` in the page. |
 | `highlightElement(element, options?)` | Highlights one element in place. |
 | `detectLanguage({ path?, code?, guess? })` | A language id from a file name or a shebang, and with `guess: true` from the code itself. `undefined` when unsure. |
 | `getLanguage(name)`, `listLanguages()` | Language info: `id`, `name`, `aliases`, `extensions`, `filenames`. |
 | `getTheme(name)`, `listThemes()` | Theme info with every color. |
 | `defineTheme(theme)` | Registers a [custom theme](#custom-themes) and returns its name. |
+| `registerAlias(alias, language)` | Makes a name mean a language, for example `registerAlias("curl", "bash")`. |
+| `init()`, `isReady()`, `subscribe(listener)` | Loading, for [`colorfulcode/web`](#in-the-browser). The other entries are always ready. |
 | `themeCss(theme, selector?)` | CSS for class based output. Also shipped as `colorfulcode/css/<name>.css`. |
 
 Unknown languages fall back to plain text. Pass `"auto"` as the language to guess it from the code first (plain text when unsure). Guessing only happens when asked for and takes well under a millisecond. It is reliable on whole files but only a best effort on snippets of a few lines, so pass the language whenever you know it.
+
+### In the browser
+
+`colorfulcode/web` has the same API with the [most used languages](#smaller-build), but loads its module as a separate `colorfulcode.wasm` file (156 KiB gzipped), optimized for size. The browser compiles it while it downloads and caches it, and nothing large sits in your JavaScript bundle. Call `init()` once and wait for it; everything is synchronous after that.
+
+```js
+import { highlight, init, isReady } from "colorfulcode/web";
+
+await init(); // fetches colorfulcode.wasm next to the module; bundlers emit it for you
+highlight(code, "ts");
+```
+
+`init()` also takes a URL, a `fetch` response or the bytes, for hosting the file elsewhere or preloading it (`colorfulcode/colorfulcode.wasm` is exported for that). Calling anything before it finishes throws, so check `isReady()` if you render before then. In React, `colorfulcode/web/react` does this for you: `<Code>` shows the plain text, starts loading and highlights once ready.
+
+The default `colorfulcode` entry embeds the module instead, so it works synchronously everywhere, including server rendering and hydration, at the cost of a bigger JavaScript bundle.
 
 ## Rust
 
@@ -228,14 +246,22 @@ Native apps usually skip themes altogether and map each kind to colors from thei
 
 ## Smaller build
 
-`colorfulcode` includes every language (349 KiB gzipped). If you only need the popular ones, `colorfulcode/common` has 55 of them (169 KiB gzipped) with the same API:
+Every entry has the same API; they differ in which languages they include and how the module loads. Sizes are gzipped:
+
+| Entry | Languages | Download | Loading |
+| --- | --- | --- | --- |
+| `colorfulcode` | all 200 | 467 KiB | embedded in the JavaScript, synchronous |
+| `colorfulcode/common` | 56 most used | 230 KiB | embedded in the JavaScript, synchronous |
+| `colorfulcode/web` | 56 most used | 156 KiB | separate `.wasm` file, after [`init()`](#in-the-browser) |
+
+Each has a React entry next to it (`colorfulcode/react`, `colorfulcode/common/react`, `colorfulcode/web/react`):
 
 ```js
 import { highlight } from "colorfulcode/common";
 import { Code } from "colorfulcode/common/react";
 ```
 
-It covers JavaScript, TypeScript, JSX, TSX, HTML, CSS, SCSS, Less, Sass, JSON, Markdown, MDX, Vue, Svelte, Astro, Python, Rust, Go, Java, Kotlin, Swift, C, C++, C#, Objective-C, Dart, Scala, Zig, Haskell, Elixir, Ruby, PHP, Perl, Lua, R, Bash, PowerShell, Batch, Dockerfile, Makefile, nginx, SQL, GraphQL, YAML, TOML, INI, dotenv, HCL, Protobuf, XML, SVG, diff and plain text. In Rust the same set is what you get with `default-features = false`.
+The 56 most used languages are JavaScript, TypeScript, JSX, TSX, HTML, CSS, SCSS, Less, Sass, JSON, Markdown, MDX, Vue, Svelte, Astro, Python, Rust, Go, Java, Kotlin, Swift, C, C++, C#, Objective-C, Dart, Scala, Zig, Haskell, Elixir, Ruby, PHP, Perl, Lua, R, Bash, PowerShell, Batch, Dockerfile, Makefile, nginx, SQL, GraphQL, HTTP, YAML, TOML, INI, dotenv, HCL, Protobuf, XML, SVG, diff and plain text. In Rust the same set is what you get with `default-features = false`.
 
 ## Benchmarks
 
