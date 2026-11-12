@@ -270,6 +270,7 @@ mod registry {
         &data::DIFF,
         &data::DOTENV,
         &data::GRAPHQL,
+        &data::HTTP,
         &data::HCL,
         &data::INI,
         &data::PROTOBUF,
